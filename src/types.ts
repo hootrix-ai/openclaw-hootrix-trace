@@ -1,7 +1,8 @@
 import type { Span, Trace } from "hootrix";
-import { buildOpikApiUrl } from "./collector-url.js";
+import { buildHootrixApiUrl } from "./collector-url.js";
+import { HOOTRIX_PLUGIN_ID } from "./constants.js";
 
-export type OpikPluginConfig = {
+export type HootrixPluginConfig = {
   enabled?: boolean;
   debug?: boolean;
   apiKey?: string;
@@ -62,9 +63,9 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
-const PLUGIN_ENTRY_IDS = ["openclaw-hootrix-trace"] as const;
+const PLUGIN_ENTRY_IDS = [HOOTRIX_PLUGIN_ID] as const;
 
-function looksLikeOpikPluginConfig(o: Record<string, unknown>): boolean {
+function looksLikeHootrixPluginConfig(o: Record<string, unknown>): boolean {
   return (
     "apiKey" in o ||
     "apiUrl" in o ||
@@ -85,7 +86,7 @@ function looksLikeOpikPluginConfig(o: Record<string, unknown>): boolean {
 
 function shouldUseEmbeddedPluginConfig(nested: Record<string, unknown>): boolean {
   if (Object.keys(nested).length === 0) return false;
-  if (looksLikeOpikPluginConfig(nested)) return true;
+  if (looksLikeHootrixPluginConfig(nested)) return true;
   if (typeof nested.enabled === "boolean") return true;
   return false;
 }
@@ -122,19 +123,19 @@ export function coercePluginConfigRoot(raw: unknown): Record<string, unknown> {
     return embedded;
   }
 
-  if (looksLikeOpikPluginConfig(o)) {
+  if (looksLikeHootrixPluginConfig(o)) {
     return o;
   }
 
   const wrapped = asObject(o.config);
-  if (looksLikeOpikPluginConfig(wrapped)) {
+  if (looksLikeHootrixPluginConfig(wrapped)) {
     return wrapped;
   }
 
   return o;
 }
 
-export function parseOpikPluginConfig(raw: unknown): OpikPluginConfig {
+export function parseHootrixPluginConfig(raw: unknown): HootrixPluginConfig {
   const cfg = coercePluginConfigRoot(raw);
   const tagsRaw = cfg.tags;
   const tags = Array.isArray(tagsRaw)
@@ -154,9 +155,9 @@ export function parseOpikPluginConfig(raw: unknown): OpikPluginConfig {
   })();
 
   const apiKey = asOptionalTrimmedString(cfg.apiKey) ?? asOptionalTrimmedString(process.env.HOOTRIX_API_KEY);
-  let apiUrl = asOptionalTrimmedString(cfg.apiUrl) ?? asOptionalTrimmedString(process.env.HOOTRIX_URL);
+  let apiUrl = asOptionalTrimmedString(cfg.apiUrl) ?? asOptionalTrimmedString(process.env.HOOTRIX_URL_OVERRIDE);
   if (apiUrl) {
-    apiUrl = buildOpikApiUrl(apiUrl.replace(/\/+$/, ""));
+    apiUrl = buildHootrixApiUrl(apiUrl.replace(/\/+$/, ""));
   }
 
   const enabledExplicit = parseOptionalBoolean(cfg.enabled);

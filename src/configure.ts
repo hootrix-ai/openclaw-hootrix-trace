@@ -1,8 +1,16 @@
 import * as p from "@clack/prompts";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import type { OpikPluginConfig } from "./types.js";
+import type { HootrixPluginConfig } from "./types.js";
 import { collectorFetch } from "./collector-fetch.js";
-import { buildOpikApiUrl, isHootrixCollectorBaseUrl } from "./collector-url.js";
+import { buildHootrixApiUrl, isHootrixCollectorBaseUrl } from "./collector-url.js";
+import {
+  HOOTRIX_CLOUD_HOST,
+  HOOTRIX_CLOUD_SIGNUP_URL,
+  HOOTRIX_COLLECTOR_HOST,
+  HOOTRIX_PLUGIN_ID,
+  DEFAULT_PROJECT_NAME,
+  DEFAULT_WORKSPACE_NAME,
+} from "./constants.js";
 import { runCloudDeviceAuth } from "./device-auth.js";
 
 type ConfigWriteAfterPolicy =
@@ -20,14 +28,10 @@ export type ConfigDeps = {
   mutateConfigFile: (options: MutateConfigFileOptions) => Promise<{ followUp?: unknown }>;
 };
 
-/** Opik Cloud host (matches SDK's DEFAULT_HOST_URL). */
-const HOOTRIX_CLOUD_HOST = "https://hootrix.ai/";
-const HOOTRIX_CLOUD_SIGNUP_URL = "https://www.hootrix.ai/signup?from=llm&source=openclaw";
 /** Default local Hootrix URL (matches SDK's DEFAULT_LOCAL_URL). */
 const DEFAULT_LOCAL_URL = "http://localhost:6820/";
 /** Max URL validation retries (matches SDK's MAX_URL_VALIDATION_RETRIES). */
 const MAX_URL_RETRIES = 3;
-const HOOTRIX_PLUGIN_ID = "openclaw-hootrix-trace";
 
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -36,7 +40,7 @@ function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-export function getOpikPluginEntry(cfg: OpenClawConfig): {
+export function getHootrixPluginEntry(cfg: OpenClawConfig): {
   enabled?: boolean;
   config: Record<string, unknown>;
 } {
@@ -51,9 +55,9 @@ export function getOpikPluginEntry(cfg: OpenClawConfig): {
   };
 }
 
-export function setOpikPluginEntry(
+export function setHootrixPluginEntry(
   cfg: OpenClawConfig,
-  config: OpikPluginConfig,
+  config: HootrixPluginConfig,
   enabled = true,
 ): OpenClawConfig {
   const root = asObject(cfg);
@@ -85,15 +89,15 @@ export function setOpikPluginEntry(
   } as OpenClawConfig;
 }
 
-function applyOpikPluginEntryToDraft(draft: OpenClawConfig, config: OpikPluginConfig, enabled = true): void {
-  const merged = setOpikPluginEntry(draft, config, enabled);
+function applyHootrixPluginEntryToDraft(draft: OpenClawConfig, config: HootrixPluginConfig, enabled = true): void {
+  const merged = setHootrixPluginEntry(draft, config, enabled);
   const root = draft as Record<string, unknown>;
   const mergedRoot = merged as Record<string, unknown>;
   root.plugins = mergedRoot.plugins;
 }
 
 // ---------------------------------------------------------------------------
-// URL helpers (mirrors opik SDK api-helpers.ts / urls.ts)
+// URL helpers (mirrors Hootrix SDK api-helpers.ts / urls.ts)
 // ---------------------------------------------------------------------------
 
 /** Ensure trailing slash on a URL. */
@@ -101,19 +105,19 @@ function normalizeUrl(url: string): string {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
-/** True when the URL targets Hootrix trace-collector (not Opik UI / Comet Cloud). */
-export { isHootrixCollectorBaseUrl, buildOpikApiUrl } from "./collector-url.js";
+/** True when the URL targets Hootrix trace-collector (not Hootrix UI / Comet Cloud). */
+export { isHootrixCollectorBaseUrl, buildHootrixApiUrl } from "./collector-url.js";
 
 /**
- * Build a browser URL pointing to the projects list in the Opik UI.
- * Cloud/self-hosted: {host}opik/{workspace}/projects
- * Local:             {host}{workspace}/projects
+ * Build a browser URL pointing to the projects list in the Hootrix UI.
+ * Cloud/self-hosted: {host}app?workspace={workspace}
+ * Local:             {host}?workspace={workspace}
  */
 function buildProjectsUrl(host: string, workspaceName: string): string {
   const base = host.endsWith("/") ? host.slice(0, -1) : host;
   const isLocal = base.includes("localhost") || base.includes("127.0.0.1");
-  const prefix = isLocal ? "" : "/opik";
-  return `${base}${prefix}/${encodeURIComponent(workspaceName)}/projects`;
+  const prefix = isLocal ? "" : "/app";
+  return `${base}${prefix}?workspace=${encodeURIComponent(workspaceName)}`;
 }
 
 function buildApiKeysUrl(host: string): string {
@@ -124,7 +128,7 @@ export function getApiKeyHelpText(
   deployment: "cloud" | "self-hosted",
   host: string,
 ): string[] {
-  const lines = [`You can find your Opik API key here:\n${buildApiKeysUrl(host)}`];
+  const lines = [`You can find your Hootrix API key here:\n${buildApiKeysUrl(host)}`];
 
   if (deployment === "cloud") {
     lines.push(`No Hootrix Cloud account yet? Sign up for a free account:\n${HOOTRIX_CLOUD_SIGNUP_URL}`);
@@ -134,15 +138,15 @@ export function getApiKeyHelpText(
 }
 
 // ---------------------------------------------------------------------------
-// API validation helpers (mirrors opik SDK api-helpers.ts)
+// API validation helpers (mirrors Hootrix SDK api-helpers.ts)
 // ---------------------------------------------------------------------------
 
 /**
- * Check if an Opik instance is accessible at the given URL.
+ * Check if an Hootrix instance is accessible at the given URL.
  * Accepts 2xx-4xx as valid (even 404 means server is running).
- * Mirrors `isOpikAccessible` in the Opik SDK.
+ * Mirrors `isHootrixAccessible` in the Hootrix SDK.
  */
-async function isOpikAccessible(url: string, timeoutMs = 5_000): Promise<boolean> {
+async function isHootrixAccessible(url: string, timeoutMs = 5_000): Promise<boolean> {
   try {
     const healthUrl = new URL("health", normalizeUrl(url)).toString();
     const fetchImpl = isHootrixCollectorBaseUrl(url) ? collectorFetch : fetch;
@@ -153,58 +157,118 @@ async function isOpikAccessible(url: string, timeoutMs = 5_000): Promise<boolean
   }
 }
 
+function buildCollectorAuthHeaders(apiKey: string): Record<string, string> {
+  return {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "X-API-Key": apiKey,
+    Authorization: `Bearer ${apiKey}`,
+  };
+}
+
+async function readCollectorResponse(res: Response): Promise<{
+  text: string;
+  json: Record<string, unknown>;
+}> {
+  const text = await res.text();
+  try {
+    return { text, json: asObject(JSON.parse(text)) };
+  } catch {
+    return { text, json: {} };
+  }
+}
+
+function collectorGlobalMessage(json: Record<string, unknown>): string {
+  const message = json.message;
+  if (typeof message === "string") {
+    return message;
+  }
+  const messageObj = asObject(message);
+  const global = messageObj.global;
+  return typeof global === "string" ? global : "";
+}
+
+function isCollectorAuthFailure(status: number, json: Record<string, unknown>): boolean {
+  if (status === 401 || status === 403) {
+    return true;
+  }
+  return json.code === "AuthFail";
+}
+
+/** Auth succeeded but ingest rejected an intentionally empty validation batch. */
+function isEmptyBatchAuthProbeSuccess(status: number, json: Record<string, unknown>): boolean {
+  if (status === 204 || (status >= 200 && status < 300)) {
+    return true;
+  }
+  if (status !== 500) {
+    return false;
+  }
+  const global = collectorGlobalMessage(json).toLowerCase();
+  return global.includes("cannot be empty") || global.includes("batch traces cannot be empty");
+}
+
 /**
- * Fetch the default workspace for an API key.
- * Mirrors `getDefaultWorkspace` in the Opik SDK.
- * @returns The default workspace name on success, throws on failure.
+ * Validate a Hootrix API key against the trace-collector ingest API.
+ * Uses an empty traces batch so auth is checked without writing trace data.
  */
-async function getDefaultWorkspace(apiKey: string, baseUrl: string): Promise<string> {
-  const accountDetailsUrl = new URL("api/rest/v2/account-details", baseUrl).toString();
-  const res = await fetch(accountDetailsUrl, {
-    headers: {
-      Authorization: apiKey,
-      "Content-Type": "application/json",
-    },
+export async function validateHootrixApiKey(
+  apiKey: string,
+  collectorBaseUrl: string = HOOTRIX_COLLECTOR_HOST,
+): Promise<void> {
+  const url = new URL("v1/private/traces/batch", normalizeUrl(collectorBaseUrl)).toString();
+  const res = await collectorFetch(url, {
+    method: "POST",
+    headers: buildCollectorAuthHeaders(apiKey),
+    body: JSON.stringify({ traces: [], spans: [] }),
     signal: AbortSignal.timeout(5_000),
   });
+  const { text, json } = await readCollectorResponse(res);
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch account details (status ${res.status})`);
+  if (isCollectorAuthFailure(res.status, json)) {
+    throw new Error(`Invalid API key (status ${res.status})`);
   }
-
-  const body = (await res.json()) as Record<string, unknown>;
-  if (typeof body.defaultWorkspaceName !== "string" || !body.defaultWorkspaceName) {
-    throw new Error("defaultWorkspaceName not found in the response");
+  if (isEmptyBatchAuthProbeSuccess(res.status, json)) {
+    return;
   }
-
-  return body.defaultWorkspaceName;
+  if (res.status === 404) {
+    throw new Error(`Collector endpoint not found at ${url}`);
+  }
+  if (res.status >= 500) {
+    const detail = collectorGlobalMessage(json) || text.trim();
+    throw new Error(
+      detail
+        ? `Collector unavailable (status ${res.status}): ${detail}`
+        : `Collector unavailable (status ${res.status})`,
+    );
+  }
+  throw new Error(`API key validation failed (status ${res.status})`);
 }
 
 // ---------------------------------------------------------------------------
-// Deployment-specific URL handlers (mirrors opik SDK clack-utils.ts)
+// Deployment-specific URL handlers (mirrors Hootrix SDK clack-utils.ts)
 // ---------------------------------------------------------------------------
 
 /**
  * Handle local deployment URL config with auto-detection and retry.
- * Mirrors `handleLocalDeploymentConfig` in the Opik SDK.
+ * Mirrors `handleLocalDeploymentConfig` in the Hootrix SDK.
  */
 async function handleLocalDeploymentConfig(): Promise<string> {
-  const isDefaultRunning = await isOpikAccessible(DEFAULT_LOCAL_URL, 3_000);
+  const isDefaultRunning = await isHootrixAccessible(DEFAULT_LOCAL_URL, 3_000);
   if (isDefaultRunning) {
-    p.log.success(`Local Opik instance detected at ${DEFAULT_LOCAL_URL}`);
+    p.log.success(`Local Hootrix instance detected at ${DEFAULT_LOCAL_URL}`);
     return normalizeUrl(DEFAULT_LOCAL_URL);
   }
 
-  p.log.warn(`Local Opik instance not found at ${DEFAULT_LOCAL_URL}`);
+  p.log.warn(`Local Hootrix instance not found at ${DEFAULT_LOCAL_URL}`);
   return promptAndValidateUrl("http://localhost:5173/");
 }
 
 /**
  * Handle self-hosted deployment URL config with retry.
- * Mirrors `handleSelfHostedDeploymentConfig` in the Opik SDK.
+ * Mirrors `handleSelfHostedDeploymentConfig` in the Hootrix SDK.
  */
 async function handleSelfHostedDeploymentConfig(): Promise<string> {
-  return promptAndValidateUrl("https://your-opik-instance.com/");
+  return promptAndValidateUrl("https://your-hootrix-instance.com/");
 }
 
 /**
@@ -214,7 +278,7 @@ async function handleSelfHostedDeploymentConfig(): Promise<string> {
 async function promptAndValidateUrl(placeholder: string): Promise<string> {
   for (let attempt = 0; attempt < MAX_URL_RETRIES; attempt++) {
     const urlInput = await p.text({
-      message: "Please enter your Opik instance URL:",
+      message: "Please enter your Hootrix instance URL:",
       placeholder,
       validate(value) {
         if (!value || !value.trim()) return "URL cannot be empty. Please enter a valid URL...";
@@ -234,32 +298,32 @@ async function promptAndValidateUrl(placeholder: string): Promise<string> {
     const normalized = normalizeUrl((urlInput as string).trim());
     const spinner = p.spinner();
     spinner.start("Checking connectivity...");
-    const accessible = await isOpikAccessible(normalized, 5_000);
+    const accessible = await isHootrixAccessible(normalized, 5_000);
     spinner.stop(accessible ? "Connected." : "Not reachable.");
 
     if (accessible) return normalized;
 
     if (attempt + 1 < MAX_URL_RETRIES) {
       p.log.error(
-        `Opik is not accessible at ${normalized}. Please try again. (Attempt ${attempt + 1}/${MAX_URL_RETRIES})`,
+        `Hootrix is not accessible at ${normalized}. Please try again. (Attempt ${attempt + 1}/${MAX_URL_RETRIES})`,
       );
     }
   }
 
-  p.cancel(`Failed to connect to Opik after ${MAX_URL_RETRIES} attempts.`);
-  throw new Error(`Failed to connect to Opik after ${MAX_URL_RETRIES} attempts`);
+  p.cancel(`Failed to connect to Hootrix after ${MAX_URL_RETRIES} attempts.`);
+  throw new Error(`Failed to connect to Hootrix after ${MAX_URL_RETRIES} attempts`);
 }
 
 /**
- * Manual API key entry with account-details validation (Opik / legacy cloud fallback).
+ * Manual API key entry with collector-side validation.
  */
 async function promptManualApiKeyCredentials(
   deployment: "cloud" | "self-hosted",
   host: string,
 ): Promise<{ apiKey: string; workspaceName: string } | null> {
-  let defaultWorkspaceName: string | undefined;
   let apiKeyValidated = false;
   let apiKey: string | undefined;
+  const collectorBaseUrl = normalizeUrl(HOOTRIX_COLLECTOR_HOST);
 
   while (!apiKeyValidated) {
     for (const line of getApiKeyHelpText(deployment, host)) {
@@ -267,7 +331,7 @@ async function promptManualApiKeyCredentials(
     }
 
     const keyInput = await p.password({
-      message: "Enter your Opik API key:",
+      message: "Enter your Hootrix API key:",
       validate(value) {
         if (!value || !value.trim()) return "API key is required";
       },
@@ -283,66 +347,70 @@ async function promptManualApiKeyCredentials(
     const spinner = p.spinner();
     spinner.start("Validating API key...");
     try {
-      defaultWorkspaceName = await getDefaultWorkspace(apiKey, host);
+      await validateHootrixApiKey(apiKey, collectorBaseUrl);
       apiKeyValidated = true;
       spinner.stop("API key validated.");
-    } catch {
+    } catch (err) {
       spinner.stop("Invalid API key.");
-      p.log.error("Invalid API key. Please check your API key and try again.");
+      const detail = err instanceof Error ? err.message : String(err);
+      if (detail.includes("Invalid API key")) {
+        p.log.error("Invalid API key. Please check your API key and try again.");
+      } else {
+        p.log.error(`${detail}. Please try again.`);
+      }
     }
   }
 
-  const workspaceInput = await p.text({
-    message: defaultWorkspaceName
-      ? `Enter your workspace name (press Enter to use: ${defaultWorkspaceName}):`
-      : "Enter your workspace name:",
-    placeholder: defaultWorkspaceName ?? "your-workspace-name",
-    initialValue: defaultWorkspaceName,
-    validate(value) {
-      if ((!value || !value.trim()) && !defaultWorkspaceName) {
-        return "Workspace name is required";
-      }
-    },
-  });
+  // const workspaceInput = await p.text({
+  //   message: `Enter your workspace name (press Enter to use: ${DEFAULT_WORKSPACE_NAME}):`,
+  //   placeholder: DEFAULT_WORKSPACE_NAME,
+  //   initialValue: DEFAULT_WORKSPACE_NAME,
+  //   validate(value) {
+  //     if ((!value || !value.trim()) && !DEFAULT_WORKSPACE_NAME) {
+  //       return "Workspace name is required";
+  //     }
+  //   },
+  // });
 
-  if (p.isCancel(workspaceInput)) {
-    p.cancel("Setup cancelled.");
-    return null;
-  }
+  // if (p.isCancel(workspaceInput)) {
+  //   p.cancel("Setup cancelled.");
+  //   return null;
+  // }
 
   return {
     apiKey: apiKey!,
-    workspaceName: ((workspaceInput as string) || defaultWorkspaceName || "default").trim(),
+    workspaceName : DEFAULT_WORKSPACE_NAME,
+    // workspaceName: ((workspaceInput as string) || DEFAULT_WORKSPACE_NAME).trim(),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Interactive configure wizard (mirrors opik SDK getOrAskForProjectData)
+// Interactive configure wizard (mirrors Hootrix SDK getOrAskForProjectData)
 // ---------------------------------------------------------------------------
 
-export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
-  p.intro("Opik setup");
+export async function runHootrixConfigure(deps: ConfigDeps): Promise<void> {
+  p.intro("Hootrix setup");
 
-  // Step 1: Check if local Opik is already running (for hint in selector)
-  const isLocalRunning = await isOpikAccessible(DEFAULT_LOCAL_URL, 3_000);
+  // Step 1: Check if local Hootrix is already running (for hint in selector)
+  const isLocalRunning = await isHootrixAccessible(DEFAULT_LOCAL_URL, 3_000);
 
   // Step 2: Deployment type selection
   const deployment = await p.select({
-    message: "Which Hootrix deployment do you want to log your traces to?",
+    message: `Authenticate your account at: ${HOOTRIX_CLOUD_SIGNUP_URL}`,
     options: [
-      { value: "cloud" as const, label: "Hootrix Cloud", hint: "https://www.hootrix.ai" },
-      {
-        value: "self-hosted" as const,
-        label: "Self-hosted Hootrix platform",
-        hint: "Custom Hootrix instance",
-      },
-      {
-        value: "local" as const,
-        label: isLocalRunning
-          ? `Local deployment (detected at ${DEFAULT_LOCAL_URL})`
-          : "Local deployment",
-        hint: isLocalRunning ? "Running" : "http://localhost:6820", // collector port
-      },
+      { value: "cloud" as const, label: "Press ENTER to open in the browser...", hint: HOOTRIX_CLOUD_SIGNUP_URL },
+      // {
+      //   value: "self-hosted" as const,
+      //   label: "Self-hosted Hootrix platform",
+      //   hint: "Custom Hootrix instance",
+      // },
+      // {
+      //   value: "local" as const, 
+      //   label: isLocalRunning
+      //     ? `Local deployment (detected at ${DEFAULT_LOCAL_URL})`
+      //     : "Local deployment",
+      //   hint: isLocalRunning ? "Running" : "http://localhost:9823", // collector port
+      // },
     ],
     initialValue: isLocalRunning ? ("local" as const) : ("cloud" as const),
   });
@@ -355,13 +423,14 @@ export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
   // Step 3: Resolve host URL based on deployment type
   let host: string;
   try {
-    if (deployment === "local") {
-      host = await handleLocalDeploymentConfig();
-    } else if (deployment === "self-hosted") {
-      host = await handleSelfHostedDeploymentConfig();
-    } else {
-      host = HOOTRIX_CLOUD_HOST;
-    }
+    host = HOOTRIX_CLOUD_HOST;
+    // if (deployment === "local") {
+    //   host = await handleLocalDeploymentConfig();
+    // } else if (deployment === "self-hosted") {
+    //   host = await handleSelfHostedDeploymentConfig();
+    // } else {
+    //   host = HOOTRIX_CLOUD_HOST;
+    // }
   } catch {
     // User cancelled or max retries — already handled via p.cancel
     return;
@@ -373,7 +442,7 @@ export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
   let apiUrlOverride: string | undefined;
 
   if (deployment === "local") {
-    workspaceName = "default";
+    workspaceName = "openclaw";
   } else if (deployment === "cloud") {
     const authSpinner = p.spinner();
     authSpinner.start("Opening browser for Hootrix Cloud sign-in…");
@@ -410,26 +479,27 @@ export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
     workspaceName = manual.workspaceName;
   }
 
-  // Step 5: Project name
-  const projectInput = await p.text({
-    message: "Enter your project name (optional):",
-    placeholder: "openclaw",
-    initialValue: "openclaw",
-  });
+  // // Step 5: Project name
+  // const projectInput = await p.text({
+  //   message: "Enter your project name (optional):",
+  //   placeholder: "openclaw",
+  //   initialValue: "openclaw",
+  // });
 
-  if (p.isCancel(projectInput)) {
-    p.cancel("Setup cancelled.");
-    return;
-  }
+  // if (p.isCancel(projectInput)) {
+  //   p.cancel("Setup cancelled.");
+  //   return;
+  // }
 
-  const projectName = (projectInput as string).trim() || "openclaw";
+  // const projectName = (projectInput as string).trim() || "openclaw";
+  const projectName = DEFAULT_PROJECT_NAME;
 
   // Step 6: Build API URL from host and write config
-  const apiUrl = apiUrlOverride ?? buildOpikApiUrl(host);
-  const existingOpik = getOpikPluginEntry(deps.readConfig()).config as OpikPluginConfig;
+  const apiUrl = apiUrlOverride ?? normalizeUrl(HOOTRIX_COLLECTOR_HOST);
+  const existingHootrix = getHootrixPluginEntry(deps.readConfig()).config as HootrixPluginConfig;
 
-  const nextOpik: OpikPluginConfig = {
-    ...existingOpik,
+  const nextHootrix: HootrixPluginConfig = {
+    ...existingHootrix,
     enabled: true,
     apiUrl,
     ...(apiKey ? { apiKey } : {}),
@@ -440,7 +510,7 @@ export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
   await deps.mutateConfigFile({
     afterWrite: { mode: "auto" },
     mutate(draft) {
-      applyOpikPluginEntryToDraft(draft, nextOpik, true);
+      applyHootrixPluginEntryToDraft(draft, nextHootrix, true);
     },
   });
 
@@ -449,13 +519,13 @@ export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
   p.note(
     [
       `API URL:    ${apiUrl}`,
-      `Workspace:  ${workspaceName}`,
-      `Project:    ${projectName}`,
+      // `Workspace:  ${workspaceName}`,
+      // `Project:    ${projectName}`,
       `API key:    ${apiKey ? "***" : "(none)"}`,
       "",
-      `View your projects: ${projectsUrl}`,
+      `View your Trace Data: ${projectsUrl}`,
     ].join("\n"),
-    "Opik configuration saved",
+    "Hootrix configuration saved",
   );
   p.outro("Restart the gateway to apply changes.");
 }
@@ -464,25 +534,25 @@ export async function runOpikConfigure(deps: ConfigDeps): Promise<void> {
 // Status display
 // ---------------------------------------------------------------------------
 
-export function showOpikStatus(deps: ConfigDeps): void {
+export function showHootrixStatus(deps: ConfigDeps): void {
   const cfg = deps.readConfig();
-  const entry = getOpikPluginEntry(cfg);
-  const opik = entry.config;
+  const entry = getHootrixPluginEntry(cfg);
+  const hootrix = entry.config;
 
-  if (entry.enabled === undefined && Object.keys(opik).length === 0) {
+  if (entry.enabled === undefined && Object.keys(hootrix).length === 0) {
     console.log("Hootrix is not configured. Run: openclaw hootrix configure");
     return;
   }
 
-  const enabled = entry.enabled !== false && opik.enabled !== false;
+  const enabled = entry.enabled !== false && hootrix.enabled !== false;
   const lines = [
     `  Enabled:    ${enabled ? "yes" : "no"}`,
-    `  API URL:    ${(opik.apiUrl as string) ?? "(default)"}`,
-    `  Workspace:  ${(opik.workspaceName as string) ?? "default"}`,
-    `  Project:    ${(opik.projectName as string) ?? "openclaw"}`,
-    `  API key:    ${opik.apiKey ? "***" : "(not set)"}`,
+    `  API URL:    ${(hootrix.apiUrl as string) ?? "(default)"}`,
+    // `  Workspace:  ${(hootrix.workspaceName as string) ?? "default"}`,
+    // `  Project:    ${(hootrix.projectName as string) ?? "openclaw"}`,
+    `  API key:    ${hootrix.apiKey ? "***" : "(not set)"}`,
   ];
-  const tags = opik.tags as string[] | undefined;
+  const tags = hootrix.tags as string[] | undefined;
   if (tags?.length) {
     lines.push(`  Tags:       ${tags.join(", ")}`);
   }

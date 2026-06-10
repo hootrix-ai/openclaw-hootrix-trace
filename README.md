@@ -15,8 +15,8 @@
 
 <div align="center">
 
-[![License](https://img.shields.io/github/license/comet-ml/opik-openclaw)](./LICENSE)
-[![npm version](https://img.shields.io/npm/v/%40opik%2Fopik-openclaw)](https://www.npmjs.com/package/openclaw-hootrix-trace)
+[![License](https://img.shields.io/github/license/hootrix-ai/openclaw-hootrix-trace)](./LICENSE)
+[![npm version](https://img.shields.io/npm/v/openclaw-hootrix-trace)](https://www.npmjs.com/package/openclaw-hootrix-trace)
 
 </div>
 
@@ -75,7 +75,7 @@ openclaw gateway run
 openclaw message send "Hello! Hootrix from openclaw"
 ```
 
-Then confirm traces in your Opik project.
+Then confirm traces in your project.
 
 ## Configuration
 
@@ -191,9 +191,9 @@ npm run test:live
 Notes:
 
 - uses an isolated `.artifacts/live-e2e/<run-id>/home/.openclaw` so it does not touch your normal OpenClaw config
-- `HOOTRIX_API_KEY`, `HOOTRIX_URL`, `OPIK_PROJECT_NAME`, and `OPIK_WORKSPACE` win if set in env
+- `HOOTRIX_API_KEY`, `HOOTRIX_URL`, `PROJECT_NAME`, and `WORKSPACE` win if set in env
 - otherwise it reuses `~/.openclaw/openclaw.json -> plugins.entries.openclaw-hootrix-trace.config` for `apiUrl` / `apiKey` / project / workspace
-- set `OPENCLAW_LIVE_USE_HOST_OPIK_CONFIG=0` to disable reading host plugin config and require explicit env-only Opik settings
+- set `OPENCLAW_LIVE_USE_HOST_CONFIG=0` to disable reading host plugin config and require explicit env-only Opik settings
 - still requires `OPENAI_API_KEY` in env for the real model call
 - packs and installs the current plugin build into a fresh OpenClaw home
 - falls back to `npx openclaw@${OPENCLAW_LIVE_OPENCLAW_VERSION:-latest}` when `openclaw` is not already on your `PATH`

@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { describe, test } from "vitest";
-import { createOpikService } from "./service.js";
+import { createHootrixService } from "./service.js";
 
 type HookHandler = (event: Record<string, unknown>, ctx: Record<string, unknown>) => void;
 
-const requiredEnv = ["HOOTRIX_API_KEY", "HOOTRIX_URL"] as const;
+const requiredEnv = ["HOOTRIX_API_KEY", "HOOTRIX_URL_OVERRIDE"] as const;
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
 const e2eEnabled = process.env.OPIK_E2E === "1";
 
@@ -20,7 +20,7 @@ describeMaybe("opik service e2e", () => {
     { timeout: 60_000 },
     async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any, { enabled: true });
+      const service = createHootrixService(api as any, { enabled: true });
 
       await service.start(createServiceContext() as any);
 

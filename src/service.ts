@@ -5,6 +5,7 @@ import type {
 } from "openclaw/plugin-sdk";
 import { onDiagnosticEvent } from "openclaw/plugin-sdk";
 import type { Opik, Span, Trace } from "hootrix";
+import { HOOTRIX_PLUGIN_ID } from "./constants.js";
 import { createAttachmentUploader } from "./service/attachment-uploader.js";
 import { registerGatewayHooks } from "./service/hooks/gateway.js";
 import { registerLlmHooks } from "./service/hooks/llm.js";
@@ -19,8 +20,7 @@ import {
   DEFAULT_STALE_TRACE_TIMEOUT_MS,
   FALLBACK_FINALIZE_DELAY_MS,
   MAX_FLUSH_RETRY_DELAY_MS,
-  OPIK_CREATED_FROM,
-  OPIK_PLUGIN_ID,
+  HOOTRIX_CREATED_FROM,
 } from "./service/constants.js";
 import {
   asNonEmptyString,
@@ -28,28 +28,28 @@ import {
   formatError,
   hasCostUsageFields,
   hasUsageFields,
-  mapUsageToOpikTokens,
+  mapUsageToHootrixTokens,
   mergeDefinedConfig,
   normalizeProvider,
-  resetOpikThreadSessionAliases,
+  resetHootrixThreadSessionAliases,
   channelMetadataFields,
   inferChannelProviderFromThreadKey,
   logChannelResolve,
   resolveTraceId,
   resolveChannelId,
   resolveChannelName,
-  resolveEffectiveOpikSessionKey,
+  resolveEffectiveHootrixSessionKey,
   resolveRunId,
   resolveToolCallId,
   resolveTrigger,
   sleep,
 } from "./service/helpers.js";
-import { sanitizeStringForOpik, sanitizeValueForOpik } from "./service/payload-sanitizer.js";
+import { sanitizeStringForHootrix, sanitizeValueForHootrix } from "./service/payload-sanitizer.js";
 import { collectorFetch } from "./collector-fetch.js";
-import { parseOpikPluginConfig, type ActiveTrace, type OpikPluginConfig } from "./types.js";
+import { parseHootrixPluginConfig, type ActiveTrace, type HootrixPluginConfig } from "./types.js";
 import { refreshSageExperiment } from "./service/sage-client.js";
 import { parseExperimentIdFromTags } from "./service/sage-experiment.js";
-import { getOpikPluginEntry } from "./configure.js";
+import { getHootrixPluginEntry } from "./configure.js";
 import {
   startPluginInstanceReporter,
   type PluginInstanceReporter,
@@ -151,35 +151,35 @@ function resetSharedRuntimeState(): void {
   exporterMetrics.flushSuccesses = 0;
   exporterMetrics.flushFailures = 0;
   exporterMetrics.flushRetries = 0;
-  resetOpikThreadSessionAliases();
+  resetHootrixThreadSessionAliases();
 }
 
-export type OpikRuntimeService = OpenClawPluginService & {
+export type HootrixRuntimeService = OpenClawPluginService & {
   registerHooks: () => void;
 };
 
-export function createOpikService(
+export function createHootrixService(
   api: OpenClawPluginApi,
-  pluginConfig: OpikPluginConfig = {},
-): OpikRuntimeService {
+  pluginConfig: HootrixPluginConfig = {},
+): HootrixRuntimeService {
   let hooksRegistered = false;
   let pluginInstanceReporter: PluginInstanceReporter | null = null;
 
   /** Merge disk + register-time + service.start ctx.config + closure pluginConfig (later wins within mergeDefinedConfig rules). */
-  function mergePluginConfigLayers(ctxConfig: unknown): OpikPluginConfig {
-    let acc = parseOpikPluginConfig(undefined);
+  function mergePluginConfigLayers(ctxConfig: unknown): HootrixPluginConfig {
+    let acc = parseHootrixPluginConfig(undefined);
     try {
       const disk = api.runtime?.config?.current?.();
-      acc = mergeDefinedConfig(acc, parseOpikPluginConfig(disk));
-      const entry = getOpikPluginEntry(disk ?? {});
+      acc = mergeDefinedConfig(acc, parseHootrixPluginConfig(disk));
+      const entry = getHootrixPluginEntry(disk ?? {});
       if (entry.enabled !== undefined) {
         acc = mergeDefinedConfig(acc, { enabled: entry.enabled });
       }
     } catch {
       /* current() unavailable or invalid */
     }
-    acc = mergeDefinedConfig(acc, parseOpikPluginConfig(api.pluginConfig));
-    acc = mergeDefinedConfig(acc, parseOpikPluginConfig(ctxConfig));
+    acc = mergeDefinedConfig(acc, parseHootrixPluginConfig(api.pluginConfig));
+    acc = mergeDefinedConfig(acc, parseHootrixPluginConfig(ctxConfig));
     return mergeDefinedConfig(acc, pluginConfig);
   }
 
@@ -272,7 +272,7 @@ export function createOpikService(
     if (warnedMissingAfterToolSessionKey) return;
     warnedMissingAfterToolSessionKey = true;
     log.warn(
-      `opik: after_tool_call missing sessionKey; using ${fallbackMode} fallback correlation (upgrade OpenClaw for strict context propagation)`,
+      `hootrix: after_tool_call missing sessionKey; using ${fallbackMode} fallback correlation (upgrade OpenClaw for strict context propagation)`,
     );
   }
 
@@ -281,7 +281,7 @@ export function createOpikService(
       traceRef.update(payload);
     } catch (err) {
       exporterMetrics.traceUpdateErrors += 1;
-      log.warn(`opik: trace.update failed (${reason}): ${formatError(err)}`);
+      log.warn(`hootrix: trace.update failed (${reason}): ${formatError(err)}`);
     }
   }
 
@@ -290,7 +290,7 @@ export function createOpikService(
       traceRef.end();
     } catch (err) {
       exporterMetrics.traceEndErrors += 1;
-      log.warn(`opik: trace.end failed (${reason}): ${formatError(err)}`);
+      log.warn(`hootrix: trace.end failed (${reason}): ${formatError(err)}`);
     }
   }
 
@@ -299,7 +299,7 @@ export function createOpikService(
       span.update(payload);
     } catch (err) {
       exporterMetrics.spanUpdateErrors += 1;
-      log.warn(`opik: span.update failed (${reason}): ${formatError(err)}`);
+      log.warn(`hootrix: span.update failed (${reason}): ${formatError(err)}`);
     }
   }
 
@@ -308,7 +308,7 @@ export function createOpikService(
       span.end();
     } catch (err) {
       exporterMetrics.spanEndErrors += 1;
-      log.warn(`opik: span.end failed (${reason}): ${formatError(err)}`);
+      log.warn(`hootrix: span.end failed (${reason}): ${formatError(err)}`);
     }
   }
 
@@ -440,7 +440,7 @@ export function createOpikService(
         exporterMetrics.flushFailures += 1;
         traceDbg("flush", { node: "flush_error", attempt, error: formatError(err) });
         log.warn(
-          `opik: flush failed (${reason}) attempt ${attempt}/${attempts}: ${formatError(err)}`,
+          `hootrix: flush failed (${reason}) attempt ${attempt}/${attempts}: ${formatError(err)}`,
         );
 
         if (attempt >= attempts) {
@@ -509,20 +509,20 @@ export function createOpikService(
 
       if (statusCode === 404) {
         log.warn(
-          `opik: configured project "${params.projectName}" was not found in workspace "${params.workspaceName}"; traces may not appear until the project exists or the plugin is reconfigured`,
+          `hootrix: configured project "${params.projectName}" was not found in workspace "${params.workspaceName}"; traces may not appear until the project exists or the plugin is reconfigured`,
         );
         return;
       }
 
       if (statusCode === 403) {
         log.warn(
-          `opik: could not access project "${params.projectName}" in workspace "${params.workspaceName}" (forbidden); verify the API key and workspace permissions`,
+          `hootrix: could not access project "${params.projectName}" in workspace "${params.workspaceName}" (forbidden); verify the API key and workspace permissions`,
         );
         return;
       }
 
       log.warn(
-        `opik: could not validate project "${params.projectName}" in workspace "${params.workspaceName}": ${formatError(err)}`,
+        `hootrix: could not validate project "${params.projectName}" in workspace "${params.workspaceName}": ${formatError(err)}`,
       );
     }
   }
@@ -561,7 +561,7 @@ export function createOpikService(
       metadata: finChannelMeta,
     });
     const metadata: Record<string, unknown> = {
-      created_from: OPIK_CREATED_FROM,
+      created_from: HOOTRIX_CREATED_FROM,
       ...active.costMeta,
       success: agentEnd?.success,
       durationMs: agentEnd?.durationMs,
@@ -740,12 +740,12 @@ export function createOpikService(
         const message = eventObj.message;
         if (!message || typeof message !== "object") return;
 
-        const sanitizedMessage = sanitizeValueForOpik(message);
+        const sanitizedMessage = sanitizeValueForHootrix(message);
         if (sanitizedMessage !== message) {
           return { message: sanitizedMessage };
         }
       } catch (err) {
-        log.warn(`opik: tool_result_persist failed: ${formatError(err)}`);
+        log.warn(`hootrix: tool_result_persist failed: ${formatError(err)}`);
       }
     });
 
@@ -753,10 +753,10 @@ export function createOpikService(
       traceDbg("hook_event", { node: "agent_end_start" });
       const agentCtxObj = agentCtx as Record<string, unknown>;
       const sessionKey =
-        resolveEffectiveOpikSessionKey(agentCtxObj) ?? resolveSessionKey(agentCtxObj);
+        resolveEffectiveHootrixSessionKey(agentCtxObj) ?? resolveSessionKey(agentCtxObj);
       traceDbg("hook_event", { node: "agent_end_session_key_resolved", sessionKey });
       if (!sessionKey) {
-        log.warn("opik: agent_end missing sessionKey");
+        log.warn("hootrix: agent_end missing sessionKey");
         return;
       }
       rememberSessionCorrelation(sessionKey, agentCtx.agentId);
@@ -764,7 +764,7 @@ export function createOpikService(
       const active = activeTraces.get(sessionKey);
       if (!active) {
         log.warn(
-          `opik: agent_end missing active trace sessionKey=${sessionKey} activeTraces=${activeTraces.size}`,
+          `hootrix: agent_end missing active trace sessionKey=${sessionKey} activeTraces=${activeTraces.size}`,
         );
         return;
       }
@@ -779,9 +779,9 @@ export function createOpikService(
 
       active.agentEnd = {
         success: event.success,
-        error: typeof event.error === "string" ? sanitizeStringForOpik(event.error) : event.error,
+        error: typeof event.error === "string" ? sanitizeStringForHootrix(event.error) : event.error,
         durationMs: event.durationMs,
-        messages: (sanitizeValueForOpik(
+        messages: (sanitizeValueForHootrix(
           ((event as Record<string, unknown>).messages as unknown[]) ?? [],
         ) as unknown[]) ?? [],
       };
@@ -824,16 +824,16 @@ export function createOpikService(
     });
   }
 
-  const service: OpikRuntimeService = {
-    id: OPIK_PLUGIN_ID,
+  const service: HootrixRuntimeService = {
+    id: HOOTRIX_PLUGIN_ID,
     registerHooks,
     async start(ctx) {
       traceDbg("service_lifecycle", { node: "service_start_begin" });
       registerHooks();
       resetSharedRuntimeState();
 
-      const opikCfg = mergePluginConfigLayers(ctx.config);
-      traceDbg("service_config", { node: "config_merged", enabled: opikCfg?.enabled });
+      const hootrixCfg = mergePluginConfigLayers(ctx.config);
+      traceDbg("service_config", { node: "config_merged", enabled: hootrixCfg?.enabled });
 
       log = {
         info: ctx.logger.info.bind(ctx.logger),
@@ -845,7 +845,7 @@ export function createOpikService(
       currentTags = pluginConfig.tags ?? ["openclaw"];
       toolResultPersistSanitizeEnabled = pluginConfig.toolResultPersistSanitizeEnabled === true;
 
-      if (!opikCfg?.enabled) {
+      if (!hootrixCfg?.enabled) {
         traceDbg("service_lifecycle", { node: "service_disabled_skipping" });
         log.warn(
           "hootrix-trace: plugin disabled (set plugins.entries.openclaw-hootrix-trace.config.enabled=true and apiUrl/apiKey)",
@@ -855,47 +855,47 @@ export function createOpikService(
       }
       traceDbg("service_lifecycle", { node: "service_enabled_proceeding" });
 
-      const apiKey = opikCfg.apiKey ?? process.env.HOOTRIX_API_KEY;
-      const apiUrl = opikCfg.apiUrl ?? process.env.HOOTRIX_URL;
+      const apiKey = hootrixCfg.apiKey ?? process.env.HOOTRIX_API_KEY;
+      const apiUrl = hootrixCfg.apiUrl ?? process.env.HOOTRIX_URL_OVERRIDE;
       if (!apiUrl?.trim()) {
         log.warn(
-          "hootrix-trace: apiUrl missing — traces will not reach collector (run `openclaw hootrix configure` or set config.apiUrl / HOOTRIX_URL)",
+          "hootrix-trace: apiUrl missing — traces will not reach collector (run `openclaw hootrix configure` or set config.apiUrl / HOOTRIX_URL_OVERRIDE)",
         );
       }
       if (!apiKey?.trim()) {
         log.warn("hootrix-trace: apiKey missing — collector ingest will be rejected");
       }
-      const projectName = opikCfg.projectName ?? trimOrUndefined(process.env.OPIK_PROJECT_NAME) ?? "openclaw";
+      const projectName = hootrixCfg.projectName ?? trimOrUndefined(process.env.HOOTRIX_PROJECT_NAME) ?? "openclaw";
       const workspaceName =
-        opikCfg.workspaceName ?? trimOrUndefined(process.env.OPIK_WORKSPACE) ?? "default";
-      const tags = opikCfg.tags ?? ["openclaw"];
+      hootrixCfg.workspaceName ?? trimOrUndefined(process.env.HOOTRIX_WORKSPACE) ?? "default";
+      const tags = hootrixCfg.tags ?? ["openclaw"];
       currentProjectName = projectName;
       currentTags = tags;
       attachmentBaseUrl = (apiUrl ?? DEFAULT_ATTACHMENT_BASE_URL).replace(/\/+$/, "");
-      toolResultPersistSanitizeEnabled = opikCfg.toolResultPersistSanitizeEnabled === true;
-      sageEnabled = opikCfg.sageEnabled === true;
-      sageMainApiUrl = opikCfg.mainApiUrl?.trim() || "http://127.0.0.1:9821";
-      sageAutoRefreshExperiment = opikCfg.sageAutoRefreshExperiment !== false;
+      toolResultPersistSanitizeEnabled = hootrixCfg.toolResultPersistSanitizeEnabled === true;
+      sageEnabled = hootrixCfg.sageEnabled === true;
+      sageMainApiUrl = hootrixCfg.mainApiUrl?.trim() || "http://127.0.0.1:9821";
+      sageAutoRefreshExperiment = hootrixCfg.sageAutoRefreshExperiment !== false;
       sageApiKey = apiKey?.trim() || undefined;
 
-      staleTraceCleanupEnabled = opikCfg.staleTraceCleanupEnabled !== false;
+      staleTraceCleanupEnabled = hootrixCfg.staleTraceCleanupEnabled !== false;
       staleTraceTimeoutMs = Math.max(
         1000,
-        asNonNegativeNumber(opikCfg.staleTraceTimeoutMs) ?? DEFAULT_STALE_TRACE_TIMEOUT_MS,
+        asNonNegativeNumber(hootrixCfg.staleTraceTimeoutMs) ?? DEFAULT_STALE_TRACE_TIMEOUT_MS,
       );
       staleSweepIntervalMs = Math.max(
         1000,
-        asNonNegativeNumber(opikCfg.staleSweepIntervalMs) ?? DEFAULT_STALE_SWEEP_INTERVAL_MS,
+        asNonNegativeNumber(hootrixCfg.staleSweepIntervalMs) ?? DEFAULT_STALE_SWEEP_INTERVAL_MS,
       );
       flushRetryCount = Math.floor(
-        asNonNegativeNumber(opikCfg.flushRetryCount) ?? DEFAULT_FLUSH_RETRY_COUNT,
+        asNonNegativeNumber(hootrixCfg.flushRetryCount) ?? DEFAULT_FLUSH_RETRY_COUNT,
       );
-      flushRetryBaseDelayMs = asNonNegativeNumber(opikCfg.flushRetryBaseDelayMs) ??
+      flushRetryBaseDelayMs = asNonNegativeNumber(hootrixCfg.flushRetryBaseDelayMs) ??
         DEFAULT_FLUSH_RETRY_BASE_DELAY_MS;
 
-      traceDbg("service_opik", { node: "initializing_opik_client", projectName, workspaceName });
+      traceDbg("service_hootrix", { node: "initializing_hootrix_client", projectName, workspaceName });
       const { disableLogger, Opik } = await import("hootrix");
-      // Suppress Opik SDK tslog console output once the exporter actually starts.
+      // Suppress SDK tslog console output once the exporter actually starts.
       disableLogger();
       client = new Opik({
         apiKey,
@@ -912,15 +912,15 @@ export function createOpikService(
             }
           : {}),
       });
-      traceDbg("service_opik", { node: "opik_client_created" });
+      traceDbg("service_hootrix", { node: "hootrix_client_created" });
 
-      traceDbg("service_opik", { node: "validating_project_target" });
+      traceDbg("service_hootrix", { node: "validating_project_target" });
       await validateProjectTarget({
         client,
         projectName,
         workspaceName,
       });
-      traceDbg("service_opik", { node: "project_target_validated" });
+      traceDbg("service_hootrix", { node: "project_target_validated" });
 
       if (apiUrl && apiKey) {
         pluginInstanceReporter = startPluginInstanceReporter({
@@ -940,7 +940,7 @@ export function createOpikService(
 
         const evtObj = evt as unknown as Record<string, unknown>;
         const sessionKey =
-          resolveEffectiveOpikSessionKey(evtObj) ?? asNonEmptyString(evt.sessionKey);
+          resolveEffectiveHootrixSessionKey(evtObj) ?? asNonEmptyString(evt.sessionKey);
         if (!sessionKey) return;
 
         const active = activeTraces.get(sessionKey);
@@ -1022,7 +1022,7 @@ export function createOpikService(
 
       traceDbg("service_lifecycle", { node: "service_start_complete" });
       log.info(
-        `opik: exporting traces to project "${projectName}" (staleCleanup=${staleTraceCleanupEnabled ? "on" : "off"}, staleTimeoutMs=${staleTraceTimeoutMs}, staleSweepMs=${staleSweepIntervalMs}, flushRetryCount=${flushRetryCount}, flushRetryBaseDelayMs=${flushRetryBaseDelayMs})`,
+        `hootrix: exporting traces to project "${projectName}" (staleCleanup=${staleTraceCleanupEnabled ? "on" : "off"}, staleTimeoutMs=${staleTraceTimeoutMs}, staleSweepMs=${staleSweepIntervalMs}, flushRetryCount=${flushRetryCount}, flushRetryBaseDelayMs=${flushRetryBaseDelayMs})`,
       );
     },
 
@@ -1055,7 +1055,7 @@ export function createOpikService(
       toolResultPersistSanitizeEnabled = false;
 
       log.info(
-        `opik: exporter metrics flushSuccesses=${exporterMetrics.flushSuccesses} flushFailures=${exporterMetrics.flushFailures} flushRetries=${exporterMetrics.flushRetries} traceUpdateErrors=${exporterMetrics.traceUpdateErrors} traceEndErrors=${exporterMetrics.traceEndErrors} spanUpdateErrors=${exporterMetrics.spanUpdateErrors} spanEndErrors=${exporterMetrics.spanEndErrors}`,
+        `hootrix: exporter metrics flushSuccesses=${exporterMetrics.flushSuccesses} flushFailures=${exporterMetrics.flushFailures} flushRetries=${exporterMetrics.flushRetries} traceUpdateErrors=${exporterMetrics.traceUpdateErrors} traceEndErrors=${exporterMetrics.traceEndErrors} spanUpdateErrors=${exporterMetrics.spanUpdateErrors} spanEndErrors=${exporterMetrics.spanEndErrors}`,
       );
     },
   };

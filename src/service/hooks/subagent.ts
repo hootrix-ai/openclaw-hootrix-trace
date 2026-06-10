@@ -1,8 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { Opik, Span, Trace } from "hootrix";
+import type { Opik as HootrixClient, Span, Trace } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
 import { asNonEmptyString, resolveTraceId } from "../helpers.js";
-import { sanitizeStringForOpik } from "../payload-sanitizer.js";
+import { sanitizeStringForHootrix } from "../payload-sanitizer.js";
 import { traceDbg } from "../../trace-logger.js";
 
 function asStringOrNumber(value: unknown): string | number | undefined {
@@ -12,7 +12,7 @@ function asStringOrNumber(value: unknown): string | number | undefined {
 
 type SubagentHooksDeps = {
   api: OpenClawPluginApi;
-  getClient: () => Opik | null;
+  getClient: () => HootrixClient | null;
   activeTraces: Map<string, ActiveTrace>;
   rememberSessionCorrelation: (sessionKey: string, agentId?: unknown) => void;
   resolveSubagentSpanContainer: (params: {
@@ -114,7 +114,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
     } catch (err) {
       traceDbg("trace_error", { node: "subagent_spawning_span_creation_failed", childSessionKey, error: deps.formatError(err) });
       deps.warn(
-        `opik: subagent span creation failed (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
+        `hootrix: subagent span creation failed (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
       );
     }
     traceDbg("hook_event", { node: "subagent_spawning_complete", childSessionKey });
@@ -172,7 +172,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
       } catch (err) {
         traceDbg("trace_error", { node: "subagent_spawned_span_creation_failed", childSessionKey, error: deps.formatError(err) });
         deps.warn(
-          `opik: subagent span creation failed on spawn (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
+          `hootrix: subagent span creation failed on spawn (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
         );
         return;
       }
@@ -263,7 +263,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
         deps.safeSpanEnd(deliverySpan, `subagent_delivery_target childSessionKey=${childSessionKey}`);
       } catch (err) {
         deps.warn(
-          `opik: subagent delivery target span failed (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
+          `hootrix: subagent delivery target span failed (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
         );
       }
       return;
@@ -292,7 +292,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
         deps.rememberSubagentSpanHost(childSessionKey, host.sessionKey, host.active, span);
       } catch (err) {
         deps.warn(
-          `opik: subagent span creation failed on delivery target (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
+          `hootrix: subagent span creation failed on delivery target (childSessionKey=${childSessionKey}): ${deps.formatError(err)}`,
         );
         return;
       }
@@ -369,7 +369,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
         }
       } catch (err) {
         deps.warn(
-          `opik: subagent span creation failed on end (targetSessionKey=${targetSessionKey ?? "unknown"}): ${deps.formatError(err)}`,
+          `hootrix: subagent span creation failed on end (targetSessionKey=${targetSessionKey ?? "unknown"}): ${deps.formatError(err)}`,
         );
         return;
       }
@@ -392,7 +392,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
 
     const error = asNonEmptyString(eventObj.error);
     if (error) {
-      const sanitizedError = sanitizeStringForOpik(error);
+      const sanitizedError = sanitizeStringForHootrix(error);
       spanUpdate.output = { error: sanitizedError };
       spanUpdate.errorInfo = {
         exceptionType: "SubagentError",

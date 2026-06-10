@@ -83,7 +83,7 @@ vi.mock("./plugin-instance-client.js", () => ({
 // ---------------------------------------------------------------------------
 // SUT import (after mocks)
 // ---------------------------------------------------------------------------
-import { createOpikService } from "./service.js";
+import { createHootrixService } from "./service.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,7 +95,7 @@ function createLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 
-/** Minimal api object matching what createOpikService expects. */
+/** Minimal api object matching what createHootrixService expects. */
 function createApi() {
   const hooks: Record<string, Function> = {};
   const api = {
@@ -169,9 +169,9 @@ describe("opik service", () => {
     mockRetrieveProject.mockReset();
     mockRetrieveProject.mockResolvedValue(undefined);
     delete process.env.HOOTRIX_API_KEY;
-    delete process.env.HOOTRIX_URL;
-    delete process.env.OPIK_PROJECT_NAME;
-    delete process.env.OPIK_WORKSPACE;
+    delete process.env.HOOTRIX_URL_OVERRIDE;
+    delete process.env.HOOTRIX_PROJECT_NAME;
+    delete process.env.HOOTRIX_WORKSPACE;
   });
 
   afterEach(() => {
@@ -184,7 +184,7 @@ describe("opik service", () => {
   describe("lifecycle & config gating", () => {
     test("no-ops when opik.enabled=false", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext(false) as any);
 
       expect(api.on).toHaveBeenCalledWith("llm_input", expect.any(Function));
@@ -194,7 +194,7 @@ describe("opik service", () => {
 
     test("initializes Opik client with config values", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -218,7 +218,7 @@ describe("opik service", () => {
 
     test("trims project and workspace names from runtime config", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -244,7 +244,7 @@ describe("opik service", () => {
 
     test("prefers pluginConfig over runtime service config", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any, {
+      const service = createHootrixService(api as any, {
         enabled: true,
         apiKey: "plugin-key",
         apiUrl: "https://plugin-opik.example.com",
@@ -275,12 +275,12 @@ describe("opik service", () => {
 
     test("falls back to env vars for client config", async () => {
       process.env.HOOTRIX_API_KEY = "env-key";
-      process.env.HOOTRIX_URL = "https://env-opik.example.com";
-      process.env.OPIK_PROJECT_NAME = "env-project";
-      process.env.OPIK_WORKSPACE = "env-workspace";
+      process.env.HOOTRIX_URL_OVERRIDE = "https://env-opik.example.com";
+      process.env.HOOTRIX_PROJECT_NAME = "env-project";
+      process.env.HOOTRIX_WORKSPACE = "env-workspace";
 
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext(true, { enabled: true }) as any);
 
       expect(mockOpikConstructor).toHaveBeenCalledWith(
@@ -296,11 +296,11 @@ describe("opik service", () => {
 
     test("trims project and workspace names from env vars", async () => {
       process.env.HOOTRIX_API_KEY = "env-key";
-      process.env.OPIK_PROJECT_NAME = "  env-project  ";
-      process.env.OPIK_WORKSPACE = "  env-workspace  ";
+      process.env.HOOTRIX_PROJECT_NAME = "  env-project  ";
+      process.env.HOOTRIX_WORKSPACE = "  env-workspace  ";
 
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext(true, { enabled: true }) as any);
 
       expect(mockOpikConstructor).toHaveBeenCalledWith(
@@ -319,11 +319,11 @@ describe("opik service", () => {
 
     test("falls back to defaults when trimmed env vars are empty", async () => {
       process.env.HOOTRIX_API_KEY = "env-key";
-      process.env.OPIK_PROJECT_NAME = "   ";
-      process.env.OPIK_WORKSPACE = "   ";
+      process.env.HOOTRIX_PROJECT_NAME = "   ";
+      process.env.HOOTRIX_WORKSPACE = "   ";
 
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext(true, { enabled: true }) as any);
 
       expect(mockOpikConstructor).toHaveBeenCalledWith(
@@ -342,7 +342,7 @@ describe("opik service", () => {
 
     test("registers lifecycle/tool/subagent hooks once and subscribes diagnostics on start", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       expect(api.on).toHaveBeenCalledTimes(10);
@@ -360,7 +360,7 @@ describe("opik service", () => {
 
     test("validates configured project in the configured workspace on start", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -385,7 +385,7 @@ describe("opik service", () => {
         projectName: "missing-project",
         workspaceName: "demo-workspace",
       });
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
 
       await service.start(ctx as any);
 
@@ -404,7 +404,7 @@ describe("opik service", () => {
         projectName: "private-project",
         workspaceName: "demo-workspace",
       });
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
 
       await service.start(ctx as any);
 
@@ -416,7 +416,7 @@ describe("opik service", () => {
 
     test("registers tool_result_persist hook only when enabled", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -435,7 +435,7 @@ describe("opik service", () => {
   describe("llm_input hook", () => {
     test("only schedules attachments from the latest history message", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -465,7 +465,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -511,7 +511,7 @@ describe("opik service", () => {
 
     test("passes the configured project name when creating traces", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -541,7 +541,7 @@ describe("opik service", () => {
 
     test("prefers llm_input event.sessionId over ctx.sessionId when sessionKey is absent", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -572,7 +572,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -606,7 +606,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -644,7 +644,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -669,7 +669,7 @@ describe("opik service", () => {
 
     test("uses custom tags from config", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, { enabled: true, apiKey: "k", tags: ["custom", "prod"] }) as any,
       );
@@ -692,7 +692,7 @@ describe("opik service", () => {
 
     test("sets tags=undefined when config tags is empty array", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, { enabled: true, apiKey: "k", tags: [] }) as any,
       );
@@ -719,7 +719,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValueOnce(firstLlmSpan).mockReturnValueOnce(secondLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m1", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -732,7 +732,7 @@ describe("opik service", () => {
 
     test("no-ops when sessionKey is missing", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -757,7 +757,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -805,7 +805,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -842,7 +842,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -876,7 +876,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -904,7 +904,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -926,7 +926,7 @@ describe("opik service", () => {
 
     test("no-ops without prior llm_input / missing sessionKey", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       // No llm_input was called, so no active trace
@@ -960,7 +960,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -985,7 +985,7 @@ describe("opik service", () => {
 
     test("no-ops without active trace", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       // No llm_input — no active trace
@@ -1012,7 +1012,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1058,7 +1058,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1089,7 +1089,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1127,7 +1127,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1158,7 +1158,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -1203,7 +1203,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1230,7 +1230,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1262,7 +1262,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1292,7 +1292,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       const ctx = createServiceContext() as any;
       await service.start(ctx);
 
@@ -1327,7 +1327,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpanA).mockReturnValueOnce(mockToolSpanB);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -1416,7 +1416,7 @@ describe("opik service", () => {
       childLlmSpan.span.mockReturnValueOnce(nestedToolSpan);
       mockTraceFn.mockReturnValueOnce(parentTrace).mockReturnValueOnce(childTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -1513,7 +1513,7 @@ describe("opik service", () => {
         .mockReturnValueOnce(childTraceA)
         .mockReturnValueOnce(childTraceB);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       const parentSession = "agent:main:feishu:direct:parent-user";
@@ -1610,7 +1610,7 @@ describe("opik service", () => {
       llmSpanB.span.mockReturnValueOnce(toolSpanB);
       mockTraceFn.mockReturnValueOnce(traceA).mockReturnValueOnce(traceB);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       const ctx = createServiceContext() as any;
       await service.start(ctx);
 
@@ -1677,7 +1677,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValueOnce(mockLlmSpan).mockReturnValueOnce(mockSubagentSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -1759,7 +1759,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValueOnce(mockLlmSpan).mockReturnValueOnce(mockSubagentSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -1829,7 +1829,7 @@ describe("opik service", () => {
       childTrace.span.mockReturnValueOnce(childLlmSpan).mockReturnValueOnce(grandchildSubagentSpan);
       mockTraceFn.mockReturnValueOnce(parentTrace).mockReturnValueOnce(childTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -1920,7 +1920,7 @@ describe("opik service", () => {
   describe("tool_result_persist hook", () => {
     test("sanitizes persisted tool messages with media image references", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -1952,7 +1952,7 @@ describe("opik service", () => {
 
     test("returns undefined when no sanitization is needed", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -1979,7 +1979,7 @@ describe("opik service", () => {
 
     test("returns undefined when tool_result_persist sanitization is disabled", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -2015,7 +2015,7 @@ describe("opik service", () => {
 
     test("only schedules attachments from the trailing final message", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2053,7 +2053,7 @@ describe("opik service", () => {
       mockLlmSpan.span.mockReturnValueOnce(mockToolSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2106,7 +2106,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2143,7 +2143,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2167,7 +2167,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2186,7 +2186,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2245,7 +2245,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2281,7 +2281,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2313,7 +2313,7 @@ describe("opik service", () => {
 
     test("no-ops without active trace", async () => {
       const { api, hooks } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       // No llm_input — no active trace
@@ -2340,7 +2340,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2396,7 +2396,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2443,7 +2443,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2483,7 +2483,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2507,7 +2507,7 @@ describe("opik service", () => {
       mockTrace.span.mockReturnValue(mockLlmSpan);
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2574,7 +2574,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2614,7 +2614,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2663,7 +2663,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(
@@ -2691,7 +2691,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2714,7 +2714,7 @@ describe("opik service", () => {
 
     test("ignores events for unknown sessionKey", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       // Dispatch for a sessionKey that has no active trace — should not throw
@@ -2737,7 +2737,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2766,7 +2766,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2808,7 +2808,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2829,7 +2829,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -2859,7 +2859,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(
         createServiceContext(true, {
           enabled: true,
@@ -2894,7 +2894,7 @@ describe("opik service", () => {
       const mockTrace2 = opikState.createMockTrace();
       mockTraceFn.mockReturnValueOnce(mockTrace1).mockReturnValueOnce(mockTrace2);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
@@ -2909,7 +2909,7 @@ describe("opik service", () => {
 
     test("unsubscribes diagnostic listener", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       expect(diagnosticListeners).toHaveLength(1);
@@ -2926,7 +2926,7 @@ describe("opik service", () => {
       const mockTrace = opikState.createMockTrace();
       mockTraceFn.mockReturnValue(mockTrace);
 
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       const ctx = createServiceContext(true, {
         enabled: true,
         apiKey: "test-key",
@@ -2951,7 +2951,7 @@ describe("opik service", () => {
 
     test("does not throw when flush rejects", async () => {
       const { api } = createApi();
-      const service = createOpikService(api as any);
+      const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
       mockFlush.mockRejectedValueOnce(new Error("network error"));

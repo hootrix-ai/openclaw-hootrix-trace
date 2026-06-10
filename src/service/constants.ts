@@ -3,8 +3,7 @@ export const DEFAULT_STALE_SWEEP_INTERVAL_MS = 60 * 1000;
 export const DEFAULT_FLUSH_RETRY_COUNT = 2;
 export const DEFAULT_FLUSH_RETRY_BASE_DELAY_MS = 250;
 export const MAX_FLUSH_RETRY_DELAY_MS = 5000;
-export const OPIK_PLUGIN_ID = "openclaw-hootrix-trace";
-export const OPIK_CREATED_FROM = "openclaw";
+export const HOOTRIX_CREATED_FROM = "openclaw";
 
 export const LOCAL_ATTACHMENT_UPLOAD_MAGIC_ID = "BEMinIO";
 export const ATTACHMENT_UPLOAD_PART_SIZE_BYTES = 8 * 1024 * 1024;

@@ -1,33 +1,43 @@
 import { Command } from "commander";
 import { describe, expect, test, vi } from "vitest";
 import {
-  buildOpikApiUrl,
-  getOpikPluginEntry,
+  buildHootrixApiUrl,
+  getHootrixPluginEntry,
   getApiKeyHelpText,
-  setOpikPluginEntry,
-  showOpikStatus,
+  setHootrixPluginEntry,
+  showHootrixStatus,
+  validateHootrixApiKey,
 } from "./configure.js";
-import { registerOpikCli } from "./cli.js";
+import { registerHootrixCli } from "./cli.js";
+import { HOOTRIX_CLOUD_SIGNUP_URL, HOOTRIX_COLLECTOR_HOST, HOOTRIX_PLUGIN_ID } from "./constants.js";
+
+vi.mock("./collector-fetch.js", () => ({
+  collectorFetch: vi.fn(),
+}));
+
+import { collectorFetch } from "./collector-fetch.js";
+
+const mockCollectorFetch = vi.mocked(collectorFetch);
 
 describe("configure helpers", () => {
-  test("buildOpikApiUrl for Hootrix collector omits /api prefix", () => {
-    expect(buildOpikApiUrl("http://127.0.0.1:9823")).toBe("http://127.0.0.1:9823/");
-    expect(buildOpikApiUrl("http://localhost:9823/")).toBe("http://localhost:9823/");
-    expect(buildOpikApiUrl("https://trace.hootrix.ai")).toBe("https://trace.hootrix.ai/");
-    expect(buildOpikApiUrl("https://test.trace.hootrix.ai/")).toBe("https://test.trace.hootrix.ai/");
+  test("buildHootrixApiUrl for Hootrix collector omits /api prefix", () => {
+    expect(buildHootrixApiUrl("http://127.0.0.1:9823")).toBe("http://127.0.0.1:9823/");
+    expect(buildHootrixApiUrl("http://localhost:9823/")).toBe("http://localhost:9823/");
+    expect(buildHootrixApiUrl("https://trace.hootrix.ai")).toBe("https://trace.hootrix.ai/");
+    expect(buildHootrixApiUrl("https://test.trace.hootrix.ai/")).toBe("https://test.trace.hootrix.ai/");
   });
 
-  test("buildOpikApiUrl for Opik UI localhost keeps /api prefix", () => {
-    expect(buildOpikApiUrl("http://localhost:5173")).toBe("http://localhost:5173/api");
+  test("buildHootrixApiUrl for Hootrix UI localhost keeps /api prefix", () => {
+    expect(buildHootrixApiUrl("http://localhost:5173")).toBe("http://localhost:5173/api");
   });
 
-  test("setOpikPluginEntry writes plugins.entries.openclaw-hootrix-trace", () => {
-    const next = setOpikPluginEntry(
+  test("setHootrixPluginEntry writes plugins.entries.openclaw-hootrix-trace", () => {
+    const next = setHootrixPluginEntry(
       {} as any,
       {
         enabled: true,
         apiKey: "test-key",
-        apiUrl: "https://opik.example.com",
+        apiUrl: "https://hootrix.example.com",
         projectName: "test-project",
         workspaceName: "test-workspace",
         tags: ["tag-a", "tag-b"],
@@ -35,19 +45,19 @@ describe("configure helpers", () => {
       true,
     ) as any;
 
-    expect(next.plugins.entries["openclaw-hootrix-trace"].enabled).toBe(true);
-    expect(next.plugins.entries["openclaw-hootrix-trace"].config).toEqual({
+    expect(next.plugins.entries[HOOTRIX_PLUGIN_ID].enabled).toBe(true);
+    expect(next.plugins.entries[HOOTRIX_PLUGIN_ID].config).toEqual({
       enabled: true,
       apiKey: "test-key",
-      apiUrl: "https://opik.example.com",
+      apiUrl: "https://hootrix.example.com",
       projectName: "test-project",
       workspaceName: "test-workspace",
       tags: ["tag-a", "tag-b"],
     });
   });
 
-  test("getOpikPluginEntry reads canonical plugin-scoped config", () => {
-    const parsed = getOpikPluginEntry({
+  test("getHootrixPluginEntry reads canonical plugin-scoped config", () => {
+    const parsed = getHootrixPluginEntry({
       plugins: {
         entries: {
           "openclaw-hootrix-trace": {
@@ -66,19 +76,61 @@ describe("configure helpers", () => {
 
   test("getApiKeyHelpText includes free signup guidance for cloud", () => {
     expect(getApiKeyHelpText("cloud", "https://www.comet.com/")).toEqual([
-      "You can find your Opik API key here:\nhttps://www.comet.com/account-settings/apiKeys",
-      "No Hootrix Cloud account yet? Sign up for a free account:\nhttps://www.hootrix.ai/signup?from=llm&source=openclaw",
+      "You can find your Hootrix API key here:\nhttps://www.comet.com/account-settings/apiKeys",
+      `No Hootrix Cloud account yet? Sign up for a free account:\n${HOOTRIX_CLOUD_SIGNUP_URL}`,
     ]);
   });
 
   test("getApiKeyHelpText omits cloud signup guidance for self-hosted", () => {
-    expect(getApiKeyHelpText("self-hosted", "https://opik.example.com/")).toEqual([
-      "You can find your Opik API key here:\nhttps://opik.example.com/account-settings/apiKeys",
+    expect(getApiKeyHelpText("self-hosted", "https://hootrix.example.com/")).toEqual([
+      "You can find your Hootrix API key here:\nhttps://hootrix.example.com/account-settings/apiKeys",
     ]);
+  });
+
+  test("validateHootrixApiKey accepts collector ingest auth success", async () => {
+    mockCollectorFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await expect(validateHootrixApiKey("hootrix_wk_test", HOOTRIX_COLLECTOR_HOST)).resolves.toBeUndefined();
+    expect(mockCollectorFetch).toHaveBeenCalledWith(
+      "https://trace.hootrix.ai/v1/private/traces/batch",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "X-API-Key": "hootrix_wk_test",
+          Authorization: "Bearer hootrix_wk_test",
+        }),
+      }),
+    );
+  });
+
+  test("validateHootrixApiKey treats empty-batch 500 as authenticated", async () => {
+    mockCollectorFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          code: "InternalError",
+          message: { global: "batch traces cannot be empty" },
+          status: 500,
+          success: false,
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await expect(validateHootrixApiKey("hootrix_wk_test", HOOTRIX_COLLECTOR_HOST)).resolves.toBeUndefined();
+  });
+
+  test("validateHootrixApiKey rejects unauthorized collector responses", async () => {
+    mockCollectorFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ code: "AuthFail", message: { global: "您未登陆" }, status: 401, success: false }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await expect(validateHootrixApiKey("bad-key", HOOTRIX_COLLECTOR_HOST)).rejects.toThrow(
+      "Invalid API key",
+    );
   });
 });
 
-describe("opik status command", () => {
+describe("hootrix status command", () => {
   test("reads plugin entry and masks api key", async () => {
     const readConfig = () =>
       ({
@@ -88,7 +140,7 @@ describe("opik status command", () => {
               enabled: true,
               config: {
                 enabled: true,
-                apiUrl: "https://opik.example.com",
+                apiUrl: "https://hootrix.example.com",
                 projectName: "demo",
                 workspaceName: "default",
                 apiKey: "secret-key",
@@ -100,7 +152,7 @@ describe("opik status command", () => {
       }) as any;
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    showOpikStatus({
+    showHootrixStatus({
       readConfig,
       mutateConfigFile: async () => ({}),
     });
@@ -115,7 +167,7 @@ describe("opik status command", () => {
     const program = new Command();
     program.exitOverride();
 
-    registerOpikCli({
+    registerHootrixCli({
       program,
       readConfig: () =>
         ({
@@ -125,7 +177,7 @@ describe("opik status command", () => {
                 enabled: true,
                 config: {
                   enabled: true,
-                  apiUrl: "https://opik.example.com",
+                  apiUrl: "https://hootrix.example.com",
                   projectName: "demo",
                   workspaceName: "default",
                   apiKey: "secret-key",

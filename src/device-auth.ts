@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { collectorFetch } from "./collector-fetch.js";
+import { HOOTRIX_PLUGIN_ID } from "./constants.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -137,7 +138,7 @@ export async function createDeviceAuthSession(params?: {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
-        client_id: params?.clientId ?? "openclaw-hootrix-trace",
+        client_id: params?.clientId ?? HOOTRIX_PLUGIN_ID,
         install_channel: params?.installChannel ?? "openclaw-configure",
         deployment: params?.deployment ?? "cloud",
       }),
@@ -267,7 +268,7 @@ export async function runCloudDeviceAuth(params?: {
       deployment: "cloud",
       installChannel: "openclaw-configure",
     });
-    logInfo(`Hootrix API: ${session.main_api_url}\nSign in at:\n${session.connect_url}`);
+    logInfo(`Hootrix API: ${session.main_api_url}\nSign in at:${session.connect_url}`);
     openBrowser(session.connect_url);
     const bundle = await waitForDeviceAuthBundle({
       session,

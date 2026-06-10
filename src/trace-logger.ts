@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-const PLUGIN_ID = "openclaw-hootrix-trace";
+import { HOOTRIX_PLUGIN_ID } from "./constants.js";
 const DEBUG_LOG_FILE = "/tmp/crabagent-debug.ndjson";
 
 export interface TraceLoggerConfig {
@@ -25,7 +25,7 @@ export class TraceLogger {
   traceDbg(phase: string, data: Record<string, unknown>): void {
     const logEntry = {
       ts: Date.now(),
-      plugin: PLUGIN_ID,
+      plugin: HOOTRIX_PLUGIN_ID,
       phase,
       ...data
     };
@@ -38,7 +38,7 @@ export class TraceLogger {
       return;
     }
 
-    const msg = `[${PLUGIN_ID}] ${phase} ${JSON.stringify(data)}`;
+    const msg = `[${HOOTRIX_PLUGIN_ID}] ${phase} ${JSON.stringify(data)}`;
     if (this.config.logger?.info) {
       this.config.logger.info(msg);
     } else {
@@ -71,7 +71,7 @@ let traceLoggerInstance: TraceLogger | null = null;
 export function createTraceLogger(config: TraceLoggerConfig): TraceLogger {
   traceLoggerInstance = new TraceLogger(config);
   if (config.logger?.info) {
-    config.logger.info(`[${PLUGIN_ID}] TraceLogger initialized, log file: ${DEBUG_LOG_FILE}`);
+    config.logger.info(`[${HOOTRIX_PLUGIN_ID}] TraceLogger initialized, log file: ${DEBUG_LOG_FILE}`);
   }
   return traceLoggerInstance;
 }

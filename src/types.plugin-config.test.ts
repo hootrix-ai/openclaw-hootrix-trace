@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { coercePluginConfigRoot, parseOpikPluginConfig } from "./types.js";
+import { coercePluginConfigRoot, parseHootrixPluginConfig } from "./types.js";
 
 describe("coercePluginConfigRoot", () => {
   test("unwraps plugins.entries.openclaw-hootrix-trace.config", () => {
@@ -21,9 +21,9 @@ describe("coercePluginConfigRoot", () => {
   });
 });
 
-describe("parseOpikPluginConfig", () => {
+describe("parseHootrixPluginConfig", () => {
   test("reads full OpenClaw-shaped document", () => {
-    const cfg = parseOpikPluginConfig({
+    const cfg = parseHootrixPluginConfig({
       plugins: {
         entries: {
           "openclaw-hootrix-trace": {
@@ -42,7 +42,7 @@ describe("parseOpikPluginConfig", () => {
   });
 
   test("defaults enabled when apiKey and apiUrl are set", () => {
-    const cfg = parseOpikPluginConfig({
+    const cfg = parseHootrixPluginConfig({
       apiKey: "hootrix_wk_test",
       apiUrl: "https://trace.hootrix.ai",
     });
@@ -51,14 +51,14 @@ describe("parseOpikPluginConfig", () => {
   });
 
   test("flat plugin config object still parses", () => {
-    const cfg = parseOpikPluginConfig({
+    const cfg = parseHootrixPluginConfig({
       enabled: true,
     });
     expect(cfg.enabled).toBe(true);
   });
 
   test("plugin entry wrapper { config: {...} } (gateway service.start shape)", () => {
-    const cfg = parseOpikPluginConfig({
+    const cfg = parseHootrixPluginConfig({
       enabled: true,
       hooks: { allowConversationAccess: true },
       config: {

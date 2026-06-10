@@ -1,14 +1,14 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
-import { runOpikConfigure, showOpikStatus, type ConfigDeps, type MutateConfigFileOptions } from "./configure.js";
+import { runHootrixConfigure, showHootrixStatus, type ConfigDeps, type MutateConfigFileOptions } from "./configure.js";
 
-type RegisterOpikCliParams = {
+type RegisterHootrixCliParams = {
   program: any;
   readConfig: () => OpenClawConfig;
   mutateConfigFile: (options: MutateConfigFileOptions) => Promise<{ followUp?: unknown }>;
 };
 
-export function registerOpikCli(params: RegisterOpikCliParams): void {
+export function registerHootrixCli(params: RegisterHootrixCliParams): void {
   const { program, readConfig, mutateConfigFile } = params;
   const deps: ConfigDeps = { readConfig, mutateConfigFile };
 
@@ -18,13 +18,13 @@ export function registerOpikCli(params: RegisterOpikCliParams): void {
     .command("configure")
     .description("Interactive setup for hootrix trace export")
     .action(async () => {
-      await runOpikConfigure(deps);
+      await runHootrixConfigure(deps);
     });
 
   root
     .command("status")
     .description("Show current hootrix configuration")
     .action(async () => {
-      showOpikStatus(deps);
+      showHootrixStatus(deps);
     });
 }

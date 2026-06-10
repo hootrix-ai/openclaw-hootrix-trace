@@ -1,5 +1,5 @@
 import type { Trace } from "hootrix";
-import type { ActiveTrace, OpikPluginConfig } from "../types.js";
+import type { ActiveTrace, HootrixPluginConfig } from "../types.js";
 import { traceDbg } from "../trace-logger.js";
 
 export type { KnownTraceType, TraceClassification } from "./trace-classification.js";
@@ -11,8 +11,8 @@ export {
   traceKindMetadata,
 } from "./trace-classification.js";
 
-/** Map OpenClaw usage fields to Opik's expected token field names. */
-export function mapUsageToOpikTokens(
+/** Map OpenClaw usage fields to Hootrix's expected token field names. */
+export function mapUsageToHootrixTokens(
   usage: Record<string, unknown> | undefined,
 ): Record<string, number> | undefined {
   if (!usage) return undefined;
@@ -26,10 +26,10 @@ export function mapUsageToOpikTokens(
 }
 
 export function mergeDefinedConfig(
-  base: OpikPluginConfig,
-  override: OpikPluginConfig,
-): OpikPluginConfig {
-  const merged: OpikPluginConfig = { ...base };
+  base: HootrixPluginConfig,
+  override: HootrixPluginConfig,
+): HootrixPluginConfig {
+  const merged: HootrixPluginConfig = { ...base };
   const mutable = merged as Record<string, unknown>;
   for (const [key, value] of Object.entries(override)) {
     if (value === undefined) continue;
@@ -222,7 +222,7 @@ export function inferCanonicalThreadKey(ctx: Record<string, unknown>): string | 
 
 const volatileSessionToCanonicalThread = new Map<string, string>();
 
-export function resetOpikThreadSessionAliases(): void {
+export function resetHootrixThreadSessionAliases(): void {
   volatileSessionToCanonicalThread.clear();
 }
 
@@ -230,7 +230,7 @@ export function resetOpikThreadSessionAliases(): void {
  * Prefer canonical `agent:…` thread id; remember volatile run session UUID → canonical for hooks that
  * only carry `sessionId`.
  */
-export function resolveEffectiveOpikSessionKey(
+export function resolveEffectiveHootrixSessionKey(
   ctx: Record<string, unknown>,
   eventSessionId?: string,
 ): string | undefined {

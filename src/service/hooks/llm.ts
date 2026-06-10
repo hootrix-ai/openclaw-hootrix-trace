@@ -1,21 +1,21 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { Opik, Span, Trace } from "hootrix";
+import type { Opik as HootrixClient, Span, Trace } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
 import {
-  OPIK_CREATED_FROM,
+  HOOTRIX_CREATED_FROM,
   FALLBACK_FINALIZE_DELAY_MS,
 } from "../constants.js";
 import {
   asNonEmptyString,
   inferCanonicalThreadKey,
-  mapUsageToOpikTokens,
+  mapUsageToHootrixTokens,
   normalizeProvider,
   resolveAgentId,
   channelMetadataFields,
   logChannelResolve,
   resolveChannelId,
   resolveChannelName,
-  resolveEffectiveOpikSessionKey,
+  resolveEffectiveHootrixSessionKey,
   resolveTrigger,
   resolveLlmEndpointMeta,
   resolveTraceId,
@@ -24,13 +24,13 @@ import {
   classificationMetadata,
   resolveTraceClassification,
 } from "../trace-classification.js";
-import { sanitizeStringForOpik, sanitizeValueForOpik } from "../payload-sanitizer.js";
+import { sanitizeStringForHootrix, sanitizeValueForHootrix } from "../payload-sanitizer.js";
 import { experimentMetadataFields, parseExperimentIdFromTags } from "../sage-experiment.js";
 import { traceDbg } from "../../trace-logger.js";
 
 type LlmHooksDeps = {
   api: OpenClawPluginApi;
-  getClient: () => Opik | null;
+  getClient: () => HootrixClient | null;
   activeTraces: Map<string, ActiveTrace>;
   getTags: () => string[];
   getProjectName: () => string;
@@ -60,7 +60,7 @@ type LlmHooksDeps = {
 /**
  * OpenClaw may only provide a per-run `sessionId` (UUID) on the first LLM call, then add a stable
  * `sessionKey` (e.g. agent:…:feishu:…). Without migration, the fallback `llm_input` would open a
- * second Opik trace for the same user turn.
+ * second Hootrix trace for the same user turn.
  */
 function migrateVolatileSessionKeyIfNeeded(
   d: Pick<LlmHooksDeps, "activeTraces" | "rememberSessionCorrelation">,
@@ -91,7 +91,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     const agentCtxObj = agentCtx as Record<string, unknown>;
     migrateVolatileSessionKeyIfNeeded(deps, agentCtxObj, asNonEmptyString(event.sessionId));
     const sessionKey =
-      resolveEffectiveOpikSessionKey(agentCtxObj, asNonEmptyString(event.sessionId)) ??
+      resolveEffectiveHootrixSessionKey(agentCtxObj, asNonEmptyString(event.sessionId)) ??
       deps.resolveSessionKey(agentCtxObj, asNonEmptyString(event.sessionId));
     if (!client) {
       traceDbg("hook_event", { node: "llm_input_no_client" });
@@ -99,7 +99,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     }
     if (!sessionKey) {
       traceDbg("hook_event", { node: "llm_input_missing_session_key" });
-      deps.warn("opik: llm_input missing sessionKey");
+      deps.warn("hootrix: llm_input missing sessionKey");
       return;
     }
     traceDbg("hook_event", { node: "llm_input_session_key", sessionKey });
@@ -126,7 +126,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     });
     const kindMeta = classificationMetadata(classification);
     const { capabilities } = classification;
-    const sanitizedSharedLlmInput = sanitizeValueForOpik({
+    const sanitizedSharedLlmInput = sanitizeValueForHootrix({
       prompt: event.prompt,
       systemPrompt: event.systemPrompt,
       imagesCount: event.imagesCount,
@@ -180,7 +180,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
           threadId: sessionKey,
           input: sanitizedSharedLlmInput,
           metadata: {
-            created_from: OPIK_CREATED_FROM,
+            created_from: HOOTRIX_CREATED_FROM,
             provider: normalizedProvider,
             model: event.model,
             sessionId: event.sessionId,
@@ -210,7 +210,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
       } catch (err) {
         traceDbg("trace_error", { node: "llm_input_trace_creation_failed", sessionKey, error: deps.formatError(err) });
         deps.warn(
-          `opik: trace creation failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`,
+          `hootrix: trace creation failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`,
         );
         return;
       }
@@ -219,7 +219,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     let llmSpan: Span | null = null;
     const llmEndpointMeta = resolveLlmEndpointMeta(event as Record<string, unknown>);
     try {
-      const sanitizedHistoryMessages = sanitizeValueForOpik(event.historyMessages);
+      const sanitizedHistoryMessages = sanitizeValueForHootrix(event.historyMessages);
       const sanitizedLlmInput = {
         ...sanitizedSharedLlmInput,
         ...(sanitizedHistoryMessages === undefined
@@ -241,7 +241,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
       traceDbg("trace_lifecycle", { node: "llm_input_span_created", sessionKey, spanName: event.model });
     } catch (err) {
       traceDbg("trace_error", { node: "llm_input_span_creation_failed", sessionKey, error: deps.formatError(err) });
-      deps.warn(`opik: llm span creation failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
+      deps.warn(`hootrix: llm span creation failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
     }
 
     const now = Date.now();
@@ -301,7 +301,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     const ev = event as Record<string, unknown>;
     migrateVolatileSessionKeyIfNeeded(deps, agentCtxObj, asNonEmptyString(ev.sessionId));
     const sessionKey =
-      resolveEffectiveOpikSessionKey(agentCtxObj, asNonEmptyString(ev.sessionId)) ??
+      resolveEffectiveHootrixSessionKey(agentCtxObj, asNonEmptyString(ev.sessionId)) ??
       deps.resolveSessionKey(agentCtxObj, asNonEmptyString(ev.sessionId));
     if (!client) {
       traceDbg("hook_event", { node: "llm_output_no_client" });
@@ -309,7 +309,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     }
     if (!sessionKey) {
       traceDbg("hook_event", { node: "llm_output_missing_session_key" });
-      deps.warn("opik: llm_output missing sessionKey");
+      deps.warn("hootrix: llm_output missing sessionKey");
       return;
     }
     traceDbg("hook_event", { node: "llm_output_session_key_resolved", sessionKey });
@@ -321,7 +321,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     if (!active?.llmSpan) {
       traceDbg("trace_error", { node: "llm_output_no_active_span", sessionKey, hasTrace: !!active, hasLlmSpan: !!active?.llmSpan, activeTracesCount: deps.activeTraces.size, activeTracesKeys: Array.from(deps.activeTraces.keys()).slice(0, 10) });
       deps.warn(
-        `opik: llm_output missing active llm span sessionKey=${sessionKey} hasTrace=${Boolean(active)} hasLlmSpan=${Boolean(active?.llmSpan)}`,
+        `hootrix: llm_output missing active llm span sessionKey=${sessionKey} hasTrace=${Boolean(active)} hasLlmSpan=${Boolean(active?.llmSpan)}`,
       );
       return;
     }
@@ -332,7 +332,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     traceDbg("trace_state", { node: "llm_output_context_applied", sessionKey, lastActivityAt: active.lastActivityAt });
 
     traceDbg("trace_data", { node: "llm_output_sanitizing", sessionKey, assistantTextsCount: event.assistantTexts?.length });
-    const sanitizedLlmOutput = sanitizeValueForOpik({
+    const sanitizedLlmOutput = sanitizeValueForHootrix({
       assistantTexts: event.assistantTexts,
       lastAssistant: event.lastAssistant,
     }) as { assistantTexts?: unknown; lastAssistant?: unknown };
@@ -348,7 +348,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
           ? active.model.trim()
           : "llm";
 
-    const opikUsage = mapUsageToOpikTokens(event.usage);
+    const hootrixUsage = mapUsageToHootrixTokens(event.usage);
 
     // 检测 LLM 调用是否失败
     const lastAssistant = event.lastAssistant as Record<string, unknown> | undefined;
@@ -358,10 +358,10 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
     const errorInfo = hasError
       ? {
           exceptionType: "LLMError",
-          message: sanitizeStringForOpik(
+          message: sanitizeStringForHootrix(
             (event.error as string) || errorMessage || `stopReason: ${stopReason || "unknown"}`,
           ),
-          traceback: sanitizeStringForOpik(
+          traceback: sanitizeStringForHootrix(
             JSON.stringify({
               error: event.error,
               stopReason,
@@ -377,7 +377,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
       node: "llm_output_span_update",
       sessionKey,
       spanName: llmSpanName,
-      usage: opikUsage,
+      usage: hootrixUsage,
       hasError,
       stopReason,
       errorMessage: errorMessage?.slice(0, 100),
@@ -387,7 +387,7 @@ export function registerLlmHooks(deps: LlmHooksDeps): void {
       name: llmSpanName,
       type: "llm",
       output: sanitizedLlmOutput as Record<string, unknown>,
-      usage: opikUsage,
+      usage: hootrixUsage,
       model: event.model,
       provider: normalizedProvider,
     };

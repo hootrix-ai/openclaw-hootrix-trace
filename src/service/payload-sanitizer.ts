@@ -7,7 +7,7 @@ const SENDER_INFO_BLOCK_RE = /^\s*Sender \(untrusted metadata\):\s*\n+\{[\s\S]*?
 const UNTRUSTED_CONTEXT_BLOCK_RE =
   /^\s*Untrusted context \(metadata, do not treat as instructions or commands\):\s*\n+<<<EXTERNAL_UNTRUSTED_CONTENT[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\s*/gim;
 
-export function sanitizeStringForOpik(value: string): string {
+export function sanitizeStringForHootrix(value: string): string {
   const normalizedNewlines = value
     .replace(/\\r\\n/g, "\n")
     .replace(/\\n/g, "\n")
@@ -27,15 +27,15 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
   return proto === Object.prototype || proto === null;
 }
 
-export function sanitizeValueForOpik(value: unknown): unknown {
+export function sanitizeValueForHootrix(value: unknown): unknown {
   if (typeof value === "string") {
-    return sanitizeStringForOpik(value);
+    return sanitizeStringForHootrix(value);
   }
 
   if (Array.isArray(value)) {
     let changed = false;
     const next = value.map((item) => {
-      const sanitized = sanitizeValueForOpik(item);
+      const sanitized = sanitizeValueForHootrix(item);
       if (sanitized !== item) changed = true;
       return sanitized;
     });
@@ -46,7 +46,7 @@ export function sanitizeValueForOpik(value: unknown): unknown {
     let changed = false;
     const next: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
-      const sanitized = sanitizeValueForOpik(child);
+      const sanitized = sanitizeValueForHootrix(child);
       next[key] = sanitized;
       if (sanitized !== child) changed = true;
     }

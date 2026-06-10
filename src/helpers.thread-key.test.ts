@@ -2,8 +2,8 @@ import { describe, expect, test } from "vitest";
 import {
   inferCanonicalThreadKey,
   normalizeAgentThreadKey,
-  resolveEffectiveOpikSessionKey,
-  resetOpikThreadSessionAliases,
+  resolveEffectiveHootrixSessionKey,
+  resetHootrixThreadSessionAliases,
   resolveMainSessionKey,
 } from "./service/helpers.js";
 
@@ -31,10 +31,10 @@ describe("inferCanonicalThreadKey", () => {
   });
 });
 
-describe("resolveEffectiveOpikSessionKey", () => {
+describe("resolveEffectiveHootrixSessionKey", () => {
   test("registers volatile session id and resolves it before alias reset", () => {
-    resetOpikThreadSessionAliases();
-    const canonical = resolveEffectiveOpikSessionKey(
+    resetHootrixThreadSessionAliases();
+    const canonical = resolveEffectiveHootrixSessionKey(
       {
         sessionId: "run-uuid-1",
         keys: ["agent:main:feishu:direct:ou_z"],
@@ -42,7 +42,7 @@ describe("resolveEffectiveOpikSessionKey", () => {
       "run-uuid-1",
     );
     expect(canonical).toBe("agent:main:feishu:direct:ou_z");
-    expect(resolveEffectiveOpikSessionKey({ sessionId: "run-uuid-1" }, "run-uuid-1")).toBe(
+    expect(resolveEffectiveHootrixSessionKey({ sessionId: "run-uuid-1" }, "run-uuid-1")).toBe(
       "agent:main:feishu:direct:ou_z",
     );
   });

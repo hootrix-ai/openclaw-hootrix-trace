@@ -10,8 +10,9 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { collectorFetch } from "./collector-fetch.js";
+import { HOOTRIX_PLUGIN_ID } from "./constants.js";
 import type { CollectorConfig } from "./service/security/api-client.js";
-import { OPIK_CREATED_FROM, OPIK_PLUGIN_ID } from "./service/constants.js";
+import { HOOTRIX_CREATED_FROM } from "./service/constants.js";
 import { traceDbg } from "./trace-logger.js";
 
 const HEARTBEAT_INTERVAL_MS = 45_000;
@@ -173,7 +174,7 @@ export function getOrCreatePluginInstanceId(): string {
     // fall through to create
   }
   const host = hostname().trim() || "host";
-  const id = `${host}-${createHash("sha256").update(host + OPIK_PLUGIN_ID).digest("hex").slice(0, 12)}-${randomUUID().slice(0, 8)}`;
+  const id = `${host}-${createHash("sha256").update(host + HOOTRIX_PLUGIN_ID).digest("hex").slice(0, 12)}-${randomUUID().slice(0, 8)}`;
   try {
     mkdirSync(INSTANCE_ID_DIR, { recursive: true });
     writeFileSync(INSTANCE_ID_FILE, id, "utf8");
@@ -228,8 +229,8 @@ export function buildPluginInstancePayload(params: {
   const host = hostname().trim() || "localhost";
   return {
     instance_id: params.instanceId,
-    plugin_id: OPIK_PLUGIN_ID,
-    plugin_type: OPIK_CREATED_FROM,
+    plugin_id: HOOTRIX_PLUGIN_ID,
+    plugin_type: HOOTRIX_CREATED_FROM,
     plugin_version: readPluginPackageVersion(),
     workspace_name: normalizeCollectorWorkspaceName(params.workspaceName),
     host,

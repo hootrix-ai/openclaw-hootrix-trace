@@ -78,7 +78,7 @@ export function createAttachmentUploader(deps: AttachmentUploaderDeps) {
 
   function scheduleAttachmentUpload(job: () => Promise<void>): void {
     attachmentQueue = attachmentQueue.then(job).catch((err: unknown) => {
-      deps.onWarn(`opik: attachment upload task failed: ${deps.formatError(err)}`);
+      deps.onWarn(`hootrix: attachment upload task failed: ${deps.formatError(err)}`);
     });
   }
 
@@ -179,7 +179,7 @@ export function createAttachmentUploader(deps: AttachmentUploaderDeps) {
       markUploadedAttachmentKey(existingKey);
     } catch (err) {
       deps.onWarn(
-        `opik: attachment upload failed (${params.reason}, entity=${params.entityType}:${params.entityId}, path=${params.filePath}): ${deps.formatError(err)}`,
+        `hootrix: attachment upload failed (${params.reason}, entity=${params.entityType}:${params.entityId}, path=${params.filePath}): ${deps.formatError(err)}`,
       );
     } finally {
       inFlightAttachmentKeys.delete(existingKey);

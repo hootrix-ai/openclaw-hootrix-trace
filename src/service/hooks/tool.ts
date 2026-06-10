@@ -1,13 +1,13 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { Opik, Span, Trace } from "hootrix";
+import type { Opik as HootrixClient, Span, Trace } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
 import { asNonEmptyString, resolveRunId, resolveToolCallId } from "../helpers.js";
-import { sanitizeStringForOpik, sanitizeValueForOpik } from "../payload-sanitizer.js";
+import { sanitizeStringForHootrix, sanitizeValueForHootrix } from "../payload-sanitizer.js";
 import { traceDbg } from "../../trace-logger.js";
 
 type ToolHooksDeps = {
   api: OpenClawPluginApi;
-  getClient: () => Opik | null;
+  getClient: () => HootrixClient | null;
   activeTraces: Map<string, ActiveTrace>;
   sessionByAgentId: Map<string, string>;
   getLastActiveSessionKey: () => string | undefined;
@@ -71,7 +71,7 @@ export function registerToolHooks(deps: ToolHooksDeps): void {
     traceDbg("trace_data", { node: "before_tool_call_span_metadata", sessionKey, metadataKeys: Object.keys(spanMetadata) });
 
     let toolSpan: Span;
-    const sanitizedInput = sanitizeValueForOpik(event.params);
+    const sanitizedInput = sanitizeValueForHootrix(event.params);
     traceDbg("trace_data", { node: "before_tool_call_sanitized_input", sessionKey, toolName: event.toolName, hasParams: !!event.params });
     try {
       traceDbg("trace_lifecycle", { node: "before_tool_call_creating_span", sessionKey, toolName: event.toolName, parentType: active.llmSpan ? "llmSpan" : "trace" });
@@ -88,7 +88,7 @@ export function registerToolHooks(deps: ToolHooksDeps): void {
     } catch (err) {
       traceDbg("trace_error", { node: "before_tool_call_span_creation_failed", sessionKey, toolName: event.toolName, error: deps.formatError(err) });
       deps.warn(
-        `opik: tool span creation failed (sessionKey=${sessionKey}, tool=${event.toolName}): ${deps.formatError(err)}`,
+        `hootrix: tool span creation failed (sessionKey=${sessionKey}, tool=${event.toolName}): ${deps.formatError(err)}`,
       );
       return;
     }
@@ -215,7 +215,7 @@ export function registerToolHooks(deps: ToolHooksDeps): void {
       spanUpdate.name = event.toolName.trim();
     }
     if (event.params && typeof event.params === "object" && !Array.isArray(event.params)) {
-      spanUpdate.input = sanitizeValueForOpik(event.params) as Record<string, unknown>;
+      spanUpdate.input = sanitizeValueForHootrix(event.params) as Record<string, unknown>;
     }
     const spanMetadata: Record<string, unknown> = {
       ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
@@ -230,7 +230,7 @@ export function registerToolHooks(deps: ToolHooksDeps): void {
     traceDbg("trace_data", { node: "after_tool_call_span_update_prepared", sessionKey, toolName: event.toolName, updateKeys: Object.keys(spanUpdate), hasError: !!event.error, hasResult: event.result !== undefined });
 
     if (event.error) {
-      const sanitizedError = sanitizeStringForOpik(event.error);
+      const sanitizedError = sanitizeStringForHootrix(event.error);
       traceDbg("trace_data", { node: "after_tool_call_error_output", sessionKey, errorLength: sanitizedError.length });
       spanUpdate.output = { error: sanitizedError };
       spanUpdate.errorInfo = {
@@ -244,7 +244,7 @@ export function registerToolHooks(deps: ToolHooksDeps): void {
           ? (event.result as Record<string, unknown>)
           : { result: event.result };
       traceDbg("trace_data", { node: "after_tool_call_result_output", sessionKey, resultType: typeof event.result });
-      spanUpdate.output = sanitizeValueForOpik(output) as Record<string, unknown>;
+      spanUpdate.output = sanitizeValueForHootrix(output) as Record<string, unknown>;
     }
 
     if (Object.keys(spanUpdate).length > 0) {
