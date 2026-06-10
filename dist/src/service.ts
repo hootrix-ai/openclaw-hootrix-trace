@@ -1,0 +1,1064 @@
+import type {
+  DiagnosticEventPayload,
+  OpenClawPluginApi,
+  OpenClawPluginService,
+} from "openclaw/plugin-sdk";
+import { onDiagnosticEvent } from "openclaw/plugin-sdk";
+import type { Opik, Span, Trace } from "hootrix";
+import { createAttachmentUploader } from "./service/attachment-uploader.js";
+import { registerGatewayHooks } from "./service/hooks/gateway.js";
+import { registerLlmHooks } from "./service/hooks/llm.js";
+import { registerSubagentHooks } from "./service/hooks/subagent.js";
+import { registerToolHooks } from "./service/hooks/tool.js";
+import {
+  ATTACHMENT_UPLOADS_ENABLED,
+  DEFAULT_ATTACHMENT_BASE_URL,
+  DEFAULT_FLUSH_RETRY_BASE_DELAY_MS,
+  DEFAULT_FLUSH_RETRY_COUNT,
+  DEFAULT_STALE_SWEEP_INTERVAL_MS,
+  DEFAULT_STALE_TRACE_TIMEOUT_MS,
+  FALLBACK_FINALIZE_DELAY_MS,
+  MAX_FLUSH_RETRY_DELAY_MS,
+  OPIK_CREATED_FROM,
+  OPIK_PLUGIN_ID,
+} from "./service/constants.js";
+import {
+  asNonEmptyString,
+  asNonNegativeNumber,
+  formatError,
+  hasCostUsageFields,
+  hasUsageFields,
+  mapUsageToOpikTokens,
+  mergeDefinedConfig,
+  normalizeProvider,
+  resetOpikThreadSessionAliases,
+  channelMetadataFields,
+  inferChannelProviderFromThreadKey,
+  logChannelResolve,
+  resolveTraceId,
+  resolveChannelId,
+  resolveChannelName,
+  resolveEffectiveOpikSessionKey,
+  resolveRunId,
+  resolveToolCallId,
+  resolveTrigger,
+  sleep,
+} from "./service/helpers.js";
+import { sanitizeStringForOpik, sanitizeValueForOpik } from "./service/payload-sanitizer.js";
+import { collectorFetch } from "./collector-fetch.js";
+import { parseOpikPluginConfig, type ActiveTrace, type OpikPluginConfig } from "./types.js";
+import { refreshSageExperiment } from "./service/sage-client.js";
+import { parseExperimentIdFromTags } from "./service/sage-experiment.js";
+import { getOpikPluginEntry } from "./configure.js";
+import {
+  startPluginInstanceReporter,
+  type PluginInstanceReporter,
+} from "./plugin-instance-client.js";
+import { traceDbg } from "../index.js";
+
+type ServiceLogger = {
+  info: (message: string) => void;
+  warn: (message: string) => void;
+};
+
+let client: Opik | null = null;
+const activeTraces = new Map<string, ActiveTrace>();
+const subagentSpanHosts = new Map<
+  string,
+  { hostSessionKey: string; active: ActiveTrace; span: Span }
+>();
+const sessionByAgentId = new Map<string, string>();
+let cleanup: (() => void) | null = null;
+let spanSeq = 0;
+let lastActiveSessionKey: string | undefined;
+let warnedMissingAfterToolSessionKey = false;
+let log: ServiceLogger = {
+  info: () => undefined,
+  warn: () => undefined,
+};
+let staleTraceTimeoutMs = DEFAULT_STALE_TRACE_TIMEOUT_MS;
+let staleSweepIntervalMs = DEFAULT_STALE_SWEEP_INTERVAL_MS;
+let staleTraceCleanupEnabled = true;
+let flushRetryCount = DEFAULT_FLUSH_RETRY_COUNT;
+let flushRetryBaseDelayMs = DEFAULT_FLUSH_RETRY_BASE_DELAY_MS;
+let attachmentBaseUrl = DEFAULT_ATTACHMENT_BASE_URL;
+let currentProjectName = "openclaw";
+let currentTags = ["openclaw"];
+let toolResultPersistSanitizeEnabled = false;
+let sageEnabled = false;
+let sageMainApiUrl = "http://127.0.0.1:9821";
+let sageAutoRefreshExperiment = true;
+let sageApiKey: string | undefined;
+let flushQueue: Promise<void> = Promise.resolve();
+// 延迟 finalize 机制：用于合并 fallback 场景的多个 LLM 调用到同一个 trace
+const pendingFinalizes = new Map<string, ReturnType<typeof setTimeout>>();
+
+type SubagentLineage = {
+  parentTurnId: string;
+  anchorParentThreadId: string;
+};
+const pendingSubagentLineage = new Map<string, SubagentLineage>();
+
+const attachmentUploader = createAttachmentUploader({
+  getClient: () => client,
+  getAttachmentBaseUrl: () => attachmentBaseUrl,
+  onWarn: (message) => log.warn(message),
+  formatError,
+  attachmentsEnabled: ATTACHMENT_UPLOADS_ENABLED,
+});
+const exporterMetrics = {
+  traceUpdateErrors: 0,
+  traceEndErrors: 0,
+  spanUpdateErrors: 0,
+  spanEndErrors: 0,
+  flushSuccesses: 0,
+  flushFailures: 0,
+  flushRetries: 0,
+};
+
+function resetSharedRuntimeState(): void {
+  traceDbg("service_state", { node: "reset_shared_runtime_state" });
+  cleanup?.();
+  client = null;
+  activeTraces.clear();
+  subagentSpanHosts.clear();
+  sessionByAgentId.clear();
+  cleanup = null;
+  spanSeq = 0;
+  lastActiveSessionKey = undefined;
+  warnedMissingAfterToolSessionKey = false;
+  staleTraceTimeoutMs = DEFAULT_STALE_TRACE_TIMEOUT_MS;
+  staleSweepIntervalMs = DEFAULT_STALE_SWEEP_INTERVAL_MS;
+  staleTraceCleanupEnabled = true;
+  flushRetryCount = DEFAULT_FLUSH_RETRY_COUNT;
+  flushRetryBaseDelayMs = DEFAULT_FLUSH_RETRY_BASE_DELAY_MS;
+  attachmentBaseUrl = DEFAULT_ATTACHMENT_BASE_URL;
+  currentProjectName = "openclaw";
+  currentTags = ["openclaw"];
+  toolResultPersistSanitizeEnabled = false;
+  sageEnabled = false;
+  sageMainApiUrl = "http://127.0.0.1:9821";
+  sageAutoRefreshExperiment = true;
+  sageApiKey = undefined;
+  flushQueue = Promise.resolve();
+  pendingFinalizes.clear();
+  pendingSubagentLineage.clear();
+  attachmentUploader.reset();
+  exporterMetrics.traceUpdateErrors = 0;
+  exporterMetrics.traceEndErrors = 0;
+  exporterMetrics.spanUpdateErrors = 0;
+  exporterMetrics.spanEndErrors = 0;
+  exporterMetrics.flushSuccesses = 0;
+  exporterMetrics.flushFailures = 0;
+  exporterMetrics.flushRetries = 0;
+  resetOpikThreadSessionAliases();
+}
+
+export type OpikRuntimeService = OpenClawPluginService & {
+  registerHooks: () => void;
+};
+
+export function createOpikService(
+  api: OpenClawPluginApi,
+  pluginConfig: OpikPluginConfig = {},
+): OpikRuntimeService {
+  let hooksRegistered = false;
+  let pluginInstanceReporter: PluginInstanceReporter | null = null;
+
+  /** Merge disk + register-time + service.start ctx.config + closure pluginConfig (later wins within mergeDefinedConfig rules). */
+  function mergePluginConfigLayers(ctxConfig: unknown): OpikPluginConfig {
+    let acc = parseOpikPluginConfig(undefined);
+    try {
+      const disk = api.runtime?.config?.current?.();
+      acc = mergeDefinedConfig(acc, parseOpikPluginConfig(disk));
+      const entry = getOpikPluginEntry(disk ?? {});
+      if (entry.enabled !== undefined) {
+        acc = mergeDefinedConfig(acc, { enabled: entry.enabled });
+      }
+    } catch {
+      /* current() unavailable or invalid */
+    }
+    acc = mergeDefinedConfig(acc, parseOpikPluginConfig(api.pluginConfig));
+    acc = mergeDefinedConfig(acc, parseOpikPluginConfig(ctxConfig));
+    return mergeDefinedConfig(acc, pluginConfig);
+  }
+
+  function rememberSessionCorrelation(sessionKey: string, agentId?: unknown): void {
+    lastActiveSessionKey = sessionKey;
+    if (typeof agentId === "string" && agentId.length > 0) {
+      sessionByAgentId.set(agentId, sessionKey);
+    }
+  }
+
+  function resolveSessionKey(
+    ctx: Record<string, unknown>,
+    sessionIdOverride?: string,
+  ): string | undefined {
+    const explicitSessionKey = asNonEmptyString(ctx.sessionKey);
+    if (explicitSessionKey) return explicitSessionKey;
+
+    const sessionId = sessionIdOverride ?? asNonEmptyString(ctx.sessionId);
+    if (sessionId) return sessionId;
+
+    const agentId = asNonEmptyString(ctx.agentId);
+    if (agentId) {
+      const mappedSessionKey = sessionByAgentId.get(agentId);
+      if (mappedSessionKey) return mappedSessionKey;
+    }
+
+    return lastActiveSessionKey;
+  }
+
+  function applyContextMeta(
+    active: ActiveTrace,
+    ctx: Record<string, unknown>,
+    sessionKey?: string,
+  ): void {
+    const explicitAgentId = asNonEmptyString(ctx.agentId);
+    if (explicitAgentId) {
+      active.agentId = explicitAgentId;
+    }
+    const explicitChannelId = asNonEmptyString(ctx.channelId);
+    if (explicitChannelId) {
+      active.channelId = explicitChannelId;
+    }
+    const channelName = resolveChannelName(ctx, sessionKey);
+    if (channelName) {
+      active.channelName = channelName;
+    }
+    const trigger = resolveTrigger(ctx);
+    if (trigger) active.trigger = trigger;
+  }
+
+  function forgetSessionCorrelation(sessionKey: string): void {
+    if (lastActiveSessionKey === sessionKey) {
+      lastActiveSessionKey = undefined;
+    }
+    for (const [agentId, mappedSessionKey] of sessionByAgentId) {
+      if (mappedSessionKey === sessionKey) {
+        sessionByAgentId.delete(agentId);
+      }
+    }
+  }
+
+  function rememberSubagentSpanHost(
+    sessionKey: string,
+    hostSessionKey: string,
+    active: ActiveTrace,
+    span: Span,
+  ): void {
+    subagentSpanHosts.set(sessionKey, { hostSessionKey, active, span });
+  }
+
+  function getSubagentSpanHost(
+    sessionKey: string,
+  ): { hostSessionKey: string; active: ActiveTrace; span: Span } | undefined {
+    return subagentSpanHosts.get(sessionKey);
+  }
+
+  function forgetSubagentSpanHost(sessionKey: string): void {
+    subagentSpanHosts.delete(sessionKey);
+  }
+
+  function forgetSubagentSpanHostsByActive(active: ActiveTrace): void {
+    for (const [sessionKey, spanHost] of subagentSpanHosts) {
+      if (spanHost.active === active) {
+        subagentSpanHosts.delete(sessionKey);
+      }
+    }
+  }
+
+  function warnMissingAfterToolSessionKey(fallbackMode: string): void {
+    if (warnedMissingAfterToolSessionKey) return;
+    warnedMissingAfterToolSessionKey = true;
+    log.warn(
+      `opik: after_tool_call missing sessionKey; using ${fallbackMode} fallback correlation (upgrade OpenClaw for strict context propagation)`,
+    );
+  }
+
+  function safeTraceUpdate(traceRef: Trace, payload: Record<string, unknown>, reason: string): void {
+    try {
+      traceRef.update(payload);
+    } catch (err) {
+      exporterMetrics.traceUpdateErrors += 1;
+      log.warn(`opik: trace.update failed (${reason}): ${formatError(err)}`);
+    }
+  }
+
+  function safeTraceEnd(traceRef: Trace, reason: string): void {
+    try {
+      traceRef.end();
+    } catch (err) {
+      exporterMetrics.traceEndErrors += 1;
+      log.warn(`opik: trace.end failed (${reason}): ${formatError(err)}`);
+    }
+  }
+
+  function safeSpanUpdate(span: Span, payload: Record<string, unknown>, reason: string): void {
+    try {
+      span.update(payload);
+    } catch (err) {
+      exporterMetrics.spanUpdateErrors += 1;
+      log.warn(`opik: span.update failed (${reason}): ${formatError(err)}`);
+    }
+  }
+
+  function safeSpanEnd(span: Span, reason: string): void {
+    try {
+      span.end();
+    } catch (err) {
+      exporterMetrics.spanEndErrors += 1;
+      log.warn(`opik: span.end failed (${reason}): ${formatError(err)}`);
+    }
+  }
+
+  function rememberSubagentLineage(
+    childSessionKey: string,
+    lineage: SubagentLineage,
+  ): void {
+    pendingSubagentLineage.set(childSessionKey, lineage);
+  }
+
+  function getSubagentLineage(childSessionKey: string): SubagentLineage | undefined {
+    return pendingSubagentLineage.get(childSessionKey);
+  }
+
+  function forgetSubagentLineage(childSessionKey: string): void {
+    pendingSubagentLineage.delete(childSessionKey);
+  }
+
+  function endChildSpans(
+    active: ActiveTrace,
+    reason: string,
+    opts?: { endSubagentSpans?: boolean },
+  ): void {
+    for (const [toolKey, toolSpan] of active.toolSpans) {
+      safeSpanEnd(toolSpan, `${reason} toolKey=${toolKey}`);
+    }
+    active.toolSpans.clear();
+
+    if (opts?.endSubagentSpans !== false) {
+      for (const [subagentKey, subagentSpan] of active.subagentSpans) {
+        safeSpanEnd(subagentSpan, `${reason} subagentKey=${subagentKey}`);
+      }
+      active.subagentSpans.clear();
+    }
+
+    if (active.llmSpan) {
+      safeSpanEnd(active.llmSpan, `${reason} llm`);
+      active.llmSpan = null;
+    }
+  }
+
+  function closeActiveTrace(active: ActiveTrace, reason: string): void {
+    endChildSpans(active, reason);
+    forgetSubagentSpanHostsByActive(active);
+
+    // Clear deferred finalization state so stale microtasks no-op.
+    active.agentEnd = undefined;
+    active.output = undefined;
+
+    safeTraceEnd(active.trace, reason);
+  }
+
+  /**
+   * Cancel pending finalize for a sessionKey.
+   * Returns true if a pending finalize was cancelled (indicates fallback scenario).
+   */
+  function cancelPendingFinalize(sessionKey: string): boolean {
+    const timeoutId = pendingFinalizes.get(sessionKey);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      pendingFinalizes.delete(sessionKey);
+      traceDbg("trace_lifecycle", { node: "pending_finalize_cancelled", sessionKey });
+      return true;
+    }
+    return false;
+  }
+
+  function resolveSessionSpanContainer(
+    sessionKey: string,
+  ): { sessionKey: string; active: ActiveTrace; parent: Trace | Span } | undefined {
+    // Subagent sessions own their tool/LLM spans on their independent trace.
+    const ownActive = activeTraces.get(sessionKey);
+    if (ownActive) {
+      return { sessionKey, active: ownActive, parent: ownActive.trace };
+    }
+
+    const spanHost = getSubagentSpanHost(sessionKey);
+    if (spanHost) {
+      return {
+        sessionKey: spanHost.hostSessionKey,
+        active: spanHost.active,
+        parent: spanHost.span,
+      };
+    }
+
+    return undefined;
+  }
+
+  function resolveSubagentSpanContainer(params: {
+    requesterSessionKey?: string;
+    childSessionKey?: string;
+    targetSessionKey?: string;
+  }): { sessionKey: string; active: ActiveTrace; parent: Trace | Span } | undefined {
+    if (params.requesterSessionKey) {
+      const requesterContainer = resolveSessionSpanContainer(params.requesterSessionKey);
+      if (requesterContainer) {
+        return requesterContainer;
+      }
+    }
+
+    const candidates = [params.childSessionKey, params.targetSessionKey];
+    for (const key of candidates) {
+      if (!key) continue;
+      const active = activeTraces.get(key);
+      if (active) {
+        return { sessionKey: key, active, parent: active.trace };
+      }
+    }
+    return undefined;
+  }
+
+  async function flushWithRetry(reason: string): Promise<void> {
+    traceDbg("flush", { node: "flush_start", reason });
+    const currentClient = client;
+    if (!currentClient) {
+      traceDbg("flush", { node: "flush_skipped_no_client" });
+      return;
+    }
+
+    const attempts = flushRetryCount + 1;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        traceDbg("flush", { node: "flush_attempt", attempt, total: attempts });
+        await currentClient.flush();
+        exporterMetrics.flushSuccesses += 1;
+        traceDbg("flush", { node: "flush_success", reason });
+        return;
+      } catch (err) {
+        exporterMetrics.flushFailures += 1;
+        traceDbg("flush", { node: "flush_error", attempt, error: formatError(err) });
+        log.warn(
+          `opik: flush failed (${reason}) attempt ${attempt}/${attempts}: ${formatError(err)}`,
+        );
+
+        if (attempt >= attempts) {
+          traceDbg("flush", { node: "flush_give_up", reason });
+          return;
+        }
+
+        exporterMetrics.flushRetries += 1;
+        const delayMs = Math.min(
+          flushRetryBaseDelayMs * 2 ** (attempt - 1),
+          MAX_FLUSH_RETRY_DELAY_MS,
+        );
+        traceDbg("flush", { node: "flush_retry_delay", delayMs });
+        if (delayMs > 0) {
+          await sleep(delayMs);
+        }
+      }
+    }
+  }
+
+  function scheduleFlush(reason: string): void {
+    traceDbg("flush", { node: "schedule_flush", reason });
+    flushQueue = flushQueue.then(() => flushWithRetry(reason)).catch((err) => {
+      traceDbg("flush", { node: "flush_queue_error", error: formatError(err) });
+    });
+  }
+
+  function trimOrUndefined(value: string | undefined): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  async function validateProjectTarget(params: {
+    client: unknown;
+    projectName: string;
+    workspaceName: string;
+  }): Promise<void> {
+    const retrieveProject =
+      typeof params.client === "object" &&
+      params.client !== null &&
+      "projects" in params.client &&
+      typeof (params.client as { projects?: { retrieveProject?: unknown } }).projects?.retrieveProject ===
+        "function"
+        ? ((params.client as {
+            projects: {
+              retrieveProject: (
+                request: { name: string },
+                requestOptions?: { workspaceName?: string },
+              ) => Promise<unknown>;
+            };
+          }).projects.retrieveProject)
+        : undefined;
+    if (!retrieveProject) return;
+
+    try {
+      await retrieveProject(
+        { name: params.projectName },
+        { workspaceName: params.workspaceName },
+      );
+    } catch (err) {
+      const statusCode =
+        typeof err === "object" && err !== null && "statusCode" in err
+          ? (err as { statusCode?: unknown }).statusCode
+          : undefined;
+
+      if (statusCode === 404) {
+        log.warn(
+          `opik: configured project "${params.projectName}" was not found in workspace "${params.workspaceName}"; traces may not appear until the project exists or the plugin is reconfigured`,
+        );
+        return;
+      }
+
+      if (statusCode === 403) {
+        log.warn(
+          `opik: could not access project "${params.projectName}" in workspace "${params.workspaceName}" (forbidden); verify the API key and workspace permissions`,
+        );
+        return;
+      }
+
+      log.warn(
+        `opik: could not validate project "${params.projectName}" in workspace "${params.workspaceName}": ${formatError(err)}`,
+      );
+    }
+  }
+
+  /** Consolidate output + metadata into a single trace.update() + trace.end(). */
+  function finalizeTrace(sessionKey: string): void {
+    const active = activeTraces.get(sessionKey);
+    if (!active) return;
+
+    // End any remaining open child spans (LLM span if llm_output didn't fire).
+    // Keep subagent bridge spans open while child sessions may still be running.
+    endChildSpans(active, `finalize sessionKey=${sessionKey}`, { endSubagentSpans: false });
+
+    // Build output: prefer llm_output data, fall back to last assistant from messages.
+    let output: Record<string, unknown> | undefined;
+    if (active.output) {
+      output = active.output;
+    } else if (active.agentEnd?.messages?.length) {
+      const last = [...active.agentEnd.messages]
+        .reverse()
+        .find((m) => (m as Record<string, unknown>)?.role === "assistant");
+      if (last) output = { output: "", lastAssistant: last };
+    }
+
+    const agentEnd = active.agentEnd;
+    if (!active.channelName && sessionKey) {
+      active.channelName = inferChannelProviderFromThreadKey(sessionKey);
+    }
+    const finChannelMeta = channelMetadataFields({
+      channelId: active.channelId,
+      channelName: active.channelName,
+    });
+    logChannelResolve("finalize_trace", sessionKey, undefined, {
+      channelId: active.channelId,
+      channelName: active.channelName,
+      metadata: finChannelMeta,
+    });
+    const metadata: Record<string, unknown> = {
+      created_from: OPIK_CREATED_FROM,
+      ...active.costMeta,
+      success: agentEnd?.success,
+      durationMs: agentEnd?.durationMs,
+      model: active.model ?? active.costMeta.model,
+      provider: active.provider ?? active.costMeta.provider,
+      ...(active.agentId ? { agentId: active.agentId } : {}),
+      ...finChannelMeta,
+      ...(active.trigger ? { trigger: active.trigger } : {}),
+      ...(active.experimentId ? { "hootrix.experiment_id": active.experimentId } : {}),
+    };
+
+    // Prefer accumulated llm_output usage, fall back to diagnostic costMeta usage.
+    if (hasUsageFields(active.usage)) {
+      metadata.usage = { ...active.usage };
+    } else if (hasCostUsageFields(active.costMeta)) {
+      metadata.usage = {
+        input: active.costMeta.usageInput,
+        output: active.costMeta.usageOutput,
+        cacheRead: active.costMeta.usageCacheRead,
+        cacheWrite: active.costMeta.usageCacheWrite,
+        total: active.costMeta.usageTotal,
+      };
+    }
+
+    // 优先使用 LLM 错误，其次使用 agentEnd 错误
+    const errorMessage = active.llmError?.message ?? agentEnd?.error;
+    if (errorMessage) metadata.error = errorMessage;
+
+    // 构建 errorInfo：优先使用 llmError，其次使用 agentEnd.error
+    const errorInfo = active.llmError
+      ? {
+          exceptionType: "LLMError",
+          message: active.llmError.message,
+          traceback: active.llmError.details ?? active.llmError.message,
+        }
+      : agentEnd?.error
+        ? {
+            exceptionType: "AgentError",
+            message: agentEnd.error,
+            traceback: agentEnd.error,
+          }
+        : undefined;
+
+    safeTraceUpdate(
+      active.trace,
+      {
+        ...(output ? { output } : {}),
+        metadata: {
+          ...metadata,
+          // 标记是否存在 LLM 错误，便于后续分析
+          hasLlmError: !!active.llmError,
+          ...(active.llmError?.model ? { llmErrorModel: active.llmError.model } : {}),
+          ...(active.llmError?.stopReason ? { llmStopReason: active.llmError.stopReason } : {}),
+        },
+        ...(errorInfo ? { errorInfo } : {}),
+      },
+      `finalize sessionKey=${sessionKey}`,
+    );
+
+    safeTraceEnd(active.trace, `finalize sessionKey=${sessionKey}`);
+    const experimentId =
+      active.experimentId ?? parseExperimentIdFromTags(currentTags);
+    forgetSubagentSpanHostsByActive(active);
+    activeTraces.delete(sessionKey);
+    forgetSessionCorrelation(sessionKey);
+    scheduleFlush(`trace-finalized sessionKey=${sessionKey}`);
+    if (sageEnabled && sageAutoRefreshExperiment && experimentId && sageApiKey) {
+      const apiKey = sageApiKey;
+      flushQueue = flushQueue
+        .then(async () => {
+          traceDbg("sage_experiment", { node: "refresh_after_finalize", experimentId, sessionKey });
+          await refreshSageExperiment({
+            mainApiUrl: sageMainApiUrl,
+            apiKey,
+            experimentId,
+          });
+        })
+        .catch((err) => {
+          log.warn(`hootrix-sage: experiment refresh failed (${experimentId}): ${formatError(err)}`);
+        });
+    }
+  }
+
+  function registerHooks(): void {
+    traceDbg("hooks_lifecycle", { node: "registerHooks_start" });
+    if (hooksRegistered) {
+      traceDbg("hooks_lifecycle", { node: "registerHooks_already_registered" });
+      return;
+    }
+    hooksRegistered = true;
+    traceDbg("hooks_lifecycle", { node: "registerHooks_proceeding" });
+
+    traceDbg("hooks_registration", { node: "registering_gateway_hooks" });
+    registerGatewayHooks({
+      api,
+      getClient: () => client,
+      activeTraces,
+      getProjectName: () => currentProjectName,
+      getTags: () => currentTags,
+      warn: (message) => log.warn(message),
+      formatError,
+    });
+    traceDbg("hooks_registration", { node: "gateway_hooks_registered" });
+
+    traceDbg("hooks_registration", { node: "registering_llm_hooks" });
+    registerLlmHooks({
+      api,
+      getClient: () => client,
+      activeTraces,
+      getTags: () => currentTags,
+      getProjectName: () => currentProjectName,
+      rememberSessionCorrelation,
+      closeActiveTrace,
+      forgetSessionCorrelation,
+      applyContextMeta,
+      safeSpanUpdate,
+      safeSpanEnd,
+      scheduleMediaAttachmentUploads: attachmentUploader.scheduleMediaAttachmentUploads,
+      warn: (message) => log.warn(message),
+      formatError,
+      resolveSessionKey,
+      cancelPendingFinalize,
+      getSubagentLineage,
+      forgetSubagentLineage,
+    });
+    traceDbg("hooks_registration", { node: "llm_hooks_registered" });
+
+    traceDbg("hooks_registration", { node: "registering_tool_hooks" });
+    registerToolHooks({
+      api,
+      getClient: () => client,
+      activeTraces,
+      sessionByAgentId,
+      getLastActiveSessionKey: () => lastActiveSessionKey,
+      rememberSessionCorrelation,
+      resolveSessionSpanContainer,
+      warnMissingAfterToolSessionKey,
+      nextSpanSeq: () => ++spanSeq,
+      safeSpanUpdate,
+      safeSpanEnd,
+      scheduleMediaAttachmentUploads: attachmentUploader.scheduleMediaAttachmentUploads,
+      getProjectName: () => currentProjectName,
+      warn: (message) => log.warn(message),
+      formatError,
+    });
+    traceDbg("hooks_registration", { node: "tool_hooks_registered" });
+
+    traceDbg("hooks_registration", { node: "registering_subagent_hooks" });
+    registerSubagentHooks({
+      api,
+      getClient: () => client,
+      activeTraces,
+      rememberSessionCorrelation,
+      resolveSubagentSpanContainer,
+      getSubagentSpanHost,
+      rememberSubagentSpanHost,
+      forgetSubagentSpanHost,
+      rememberSubagentLineage,
+      forgetSubagentLineage,
+      safeSpanUpdate,
+      safeSpanEnd,
+      safeTraceUpdate,
+      warn: (message) => log.warn(message),
+      formatError,
+    });
+    traceDbg("hooks_registration", { node: "subagent_hooks_registered" });
+
+    api.on("tool_result_persist", (event) => {
+      traceDbg("hook_event", { node: "tool_result_persist", enabled: toolResultPersistSanitizeEnabled });
+      if (!toolResultPersistSanitizeEnabled) {
+        return;
+      }
+
+      try {
+        const eventObj = event as Record<string, unknown>;
+        const message = eventObj.message;
+        if (!message || typeof message !== "object") return;
+
+        const sanitizedMessage = sanitizeValueForOpik(message);
+        if (sanitizedMessage !== message) {
+          return { message: sanitizedMessage };
+        }
+      } catch (err) {
+        log.warn(`opik: tool_result_persist failed: ${formatError(err)}`);
+      }
+    });
+
+    api.on("agent_end", (event, agentCtx) => {
+      traceDbg("hook_event", { node: "agent_end_start" });
+      const agentCtxObj = agentCtx as Record<string, unknown>;
+      const sessionKey =
+        resolveEffectiveOpikSessionKey(agentCtxObj) ?? resolveSessionKey(agentCtxObj);
+      traceDbg("hook_event", { node: "agent_end_session_key_resolved", sessionKey });
+      if (!sessionKey) {
+        log.warn("opik: agent_end missing sessionKey");
+        return;
+      }
+      rememberSessionCorrelation(sessionKey, agentCtx.agentId);
+
+      const active = activeTraces.get(sessionKey);
+      if (!active) {
+        log.warn(
+          `opik: agent_end missing active trace sessionKey=${sessionKey} activeTraces=${activeTraces.size}`,
+        );
+        return;
+      }
+
+      applyContextMeta(active, agentCtx as Record<string, unknown>, sessionKey);
+      for (const [toolKey, toolSpan] of active.toolSpans) {
+        safeSpanEnd(toolSpan, `agent_end orphan tool sessionKey=${sessionKey} toolKey=${toolKey}`);
+      }
+      active.toolSpans.clear();
+
+      // Subagent bridge spans are ended by subagent_ended, not main agent_end.
+
+      active.agentEnd = {
+        success: event.success,
+        error: typeof event.error === "string" ? sanitizeStringForOpik(event.error) : event.error,
+        durationMs: event.durationMs,
+        messages: (sanitizeValueForOpik(
+          ((event as Record<string, unknown>).messages as unknown[]) ?? [],
+        ) as unknown[]) ?? [],
+      };
+
+      attachmentUploader.scheduleMediaAttachmentUploads({
+        entityType: "trace",
+        entity: active.trace,
+        projectName: currentProjectName,
+        reason: `agent_end sessionKey=${sessionKey}`,
+        payloads: [
+          event.error,
+          ((event as Record<string, unknown>).messages as unknown[] | undefined)?.at(-1),
+        ],
+      });
+
+      // 延迟 finalize 以支持 fallback 场景：如果 20 秒内有新的 LLM 调用，取消本次 finalize
+      if (pendingFinalizes.has(sessionKey)) {
+        clearTimeout(pendingFinalizes.get(sessionKey)!);
+        traceDbg("trace_lifecycle", { node: "cancelled_previous_finalize", sessionKey });
+      }
+
+      const timeoutId = setTimeout(() => {
+        pendingFinalizes.delete(sessionKey);
+        const current = activeTraces.get(sessionKey);
+        if (current && current.trace === active.trace) {
+          traceDbg("trace_lifecycle", { node: "delayed_finalize_executing", sessionKey, delayMs: FALLBACK_FINALIZE_DELAY_MS });
+          finalizeTrace(sessionKey);
+        }
+      }, FALLBACK_FINALIZE_DELAY_MS);
+
+      pendingFinalizes.set(sessionKey, timeoutId);
+      traceDbg("trace_lifecycle", { node: "delayed_finalize_scheduled", sessionKey, delayMs: FALLBACK_FINALIZE_DELAY_MS });
+
+      // Return session fields to hootrix to prevent status from staying "running"
+      // and to prevent session list fields from being overwritten with empty values.
+      return {
+        ...event,
+        status: event.success ? "completed" : "failed",
+      };
+    });
+  }
+
+  const service: OpikRuntimeService = {
+    id: OPIK_PLUGIN_ID,
+    registerHooks,
+    async start(ctx) {
+      traceDbg("service_lifecycle", { node: "service_start_begin" });
+      registerHooks();
+      resetSharedRuntimeState();
+
+      const opikCfg = mergePluginConfigLayers(ctx.config);
+      traceDbg("service_config", { node: "config_merged", enabled: opikCfg?.enabled });
+
+      log = {
+        info: ctx.logger.info.bind(ctx.logger),
+        warn: ctx.logger.warn.bind(ctx.logger),
+      };
+      traceDbg("service_lifecycle", { node: "logger_initialized" });
+
+      currentProjectName = pluginConfig.projectName?.trim() || "openclaw";
+      currentTags = pluginConfig.tags ?? ["openclaw"];
+      toolResultPersistSanitizeEnabled = pluginConfig.toolResultPersistSanitizeEnabled === true;
+
+      if (!opikCfg?.enabled) {
+        traceDbg("service_lifecycle", { node: "service_disabled_skipping" });
+        log.warn(
+          "hootrix-trace: plugin disabled (set plugins.entries.openclaw-hootrix-trace.config.enabled=true and apiUrl/apiKey)",
+        );
+        cleanup = () => undefined;
+        return;
+      }
+      traceDbg("service_lifecycle", { node: "service_enabled_proceeding" });
+
+      const apiKey = opikCfg.apiKey ?? process.env.HOOTRIX_API_KEY;
+      const apiUrl = opikCfg.apiUrl ?? process.env.HOOTRIX_URL;
+      if (!apiUrl?.trim()) {
+        log.warn(
+          "hootrix-trace: apiUrl missing — traces will not reach collector (run `openclaw hootrix configure` or set config.apiUrl / HOOTRIX_URL)",
+        );
+      }
+      if (!apiKey?.trim()) {
+        log.warn("hootrix-trace: apiKey missing — collector ingest will be rejected");
+      }
+      const projectName = opikCfg.projectName ?? trimOrUndefined(process.env.OPIK_PROJECT_NAME) ?? "openclaw";
+      const workspaceName =
+        opikCfg.workspaceName ?? trimOrUndefined(process.env.OPIK_WORKSPACE) ?? "default";
+      const tags = opikCfg.tags ?? ["openclaw"];
+      currentProjectName = projectName;
+      currentTags = tags;
+      attachmentBaseUrl = (apiUrl ?? DEFAULT_ATTACHMENT_BASE_URL).replace(/\/+$/, "");
+      toolResultPersistSanitizeEnabled = opikCfg.toolResultPersistSanitizeEnabled === true;
+      sageEnabled = opikCfg.sageEnabled === true;
+      sageMainApiUrl = opikCfg.mainApiUrl?.trim() || "http://127.0.0.1:9821";
+      sageAutoRefreshExperiment = opikCfg.sageAutoRefreshExperiment !== false;
+      sageApiKey = apiKey?.trim() || undefined;
+
+      staleTraceCleanupEnabled = opikCfg.staleTraceCleanupEnabled !== false;
+      staleTraceTimeoutMs = Math.max(
+        1000,
+        asNonNegativeNumber(opikCfg.staleTraceTimeoutMs) ?? DEFAULT_STALE_TRACE_TIMEOUT_MS,
+      );
+      staleSweepIntervalMs = Math.max(
+        1000,
+        asNonNegativeNumber(opikCfg.staleSweepIntervalMs) ?? DEFAULT_STALE_SWEEP_INTERVAL_MS,
+      );
+      flushRetryCount = Math.floor(
+        asNonNegativeNumber(opikCfg.flushRetryCount) ?? DEFAULT_FLUSH_RETRY_COUNT,
+      );
+      flushRetryBaseDelayMs = asNonNegativeNumber(opikCfg.flushRetryBaseDelayMs) ??
+        DEFAULT_FLUSH_RETRY_BASE_DELAY_MS;
+
+      traceDbg("service_opik", { node: "initializing_opik_client", projectName, workspaceName });
+      const { disableLogger, Opik } = await import("hootrix");
+      // Suppress Opik SDK tslog console output once the exporter actually starts.
+      disableLogger();
+      client = new Opik({
+        apiKey,
+        ...(apiUrl ? { apiUrl } : {}),
+        projectName,
+        workspaceName,
+        fetch: collectorFetch,
+        ...(apiKey
+          ? {
+              headers: {
+                "X-API-Key": apiKey,
+                Authorization: `Bearer ${apiKey}`,
+              },
+            }
+          : {}),
+      });
+      traceDbg("service_opik", { node: "opik_client_created" });
+
+      traceDbg("service_opik", { node: "validating_project_target" });
+      await validateProjectTarget({
+        client,
+        projectName,
+        workspaceName,
+      });
+      traceDbg("service_opik", { node: "project_target_validated" });
+
+      if (apiUrl && apiKey) {
+        pluginInstanceReporter = startPluginInstanceReporter({
+          config: { baseUrl: apiUrl, apiKey },
+          workspaceName,
+          agentCount: () => activeTraces.size,
+        });
+        traceDbg("plugin_instance", { node: "reporter_started", workspaceName });
+      }
+
+      // =====================================================================
+      // Diagnostic event: model.usage — Accumulate cost/context info
+      // =====================================================================
+      traceDbg("service_diagnostics", { node: "subscribing_to_diagnostics" });
+      const unsubscribeDiagnosticsRaw = onDiagnosticEvent((evt: DiagnosticEventPayload) => {
+        if (evt.type !== "model.usage") return;
+
+        const evtObj = evt as unknown as Record<string, unknown>;
+        const sessionKey =
+          resolveEffectiveOpikSessionKey(evtObj) ?? asNonEmptyString(evt.sessionKey);
+        if (!sessionKey) return;
+
+        const active = activeTraces.get(sessionKey);
+        if (!active) return;
+
+        // Accumulate cost metadata — will be merged into trace at agent_end.
+        if (evt.costUsd !== undefined) {
+          active.costMeta.costUsd = evt.costUsd;
+        }
+        if (evt.context?.limit !== undefined) {
+          active.costMeta.contextLimit = evt.context.limit;
+        }
+        if (evt.context?.used !== undefined) {
+          active.costMeta.contextUsed = evt.context.used;
+        }
+        if (evt.model) active.costMeta.model = evt.model;
+        if (evt.provider) active.costMeta.provider = normalizeProvider(evt.provider) ?? evt.provider;
+        if (evt.durationMs !== undefined) active.costMeta.durationMs = evt.durationMs;
+        if (evt.usage) {
+          active.costMeta.usageInput = evt.usage.input;
+          active.costMeta.usageOutput = evt.usage.output;
+          active.costMeta.usageCacheRead = evt.usage.cacheRead;
+          active.costMeta.usageCacheWrite = evt.usage.cacheWrite;
+          active.costMeta.usageTotal = evt.usage.total;
+        }
+      });
+      const unsubscribeDiagnostics =
+        typeof unsubscribeDiagnosticsRaw === "function" ? unsubscribeDiagnosticsRaw : () => undefined;
+
+      // =====================================================================
+      // Stale trace cleanup interval (based on inactivity, not age)
+      // =====================================================================
+      const sweepInterval = staleTraceCleanupEnabled
+        ? setInterval(() => {
+            const now = Date.now();
+            for (const [key, active] of activeTraces) {
+              if (now - active.lastActivityAt > staleTraceTimeoutMs) {
+                endChildSpans(active, `stale cleanup sessionKey=${key}`);
+
+                // Mark trace as stale before closing.
+                safeTraceUpdate(
+                  active.trace,
+                  {
+                    metadata: { staleCleanup: true },
+                    errorInfo: {
+                      exceptionType: "StaleTrace",
+                      message: "Trace exceeded maximum inactivity threshold and was forcibly ended",
+                      traceback: `Stale trace for sessionKey=${key}, inactive=${now - active.lastActivityAt}ms`,
+                    },
+                  },
+                  `stale cleanup sessionKey=${key}`,
+                );
+
+                safeTraceEnd(active.trace, `stale cleanup sessionKey=${key}`);
+                forgetSubagentSpanHostsByActive(active);
+                activeTraces.delete(key);
+                forgetSessionCorrelation(key);
+              }
+            }
+
+            // Flush when no active traces remain.
+            if (activeTraces.size === 0) {
+              scheduleFlush("stale cleanup empty active traces");
+            }
+          }, staleSweepIntervalMs)
+        : null;
+
+      // =====================================================================
+      // Wire cleanup
+      // =====================================================================
+      traceDbg("service_cleanup", { node: "setting_up_cleanup" });
+      cleanup = () => {
+        traceDbg("service_cleanup", { node: "cleanup_invoked" });
+        unsubscribeDiagnostics();
+        if (sweepInterval) {
+          clearInterval(sweepInterval);
+        }
+      };
+
+      traceDbg("service_lifecycle", { node: "service_start_complete" });
+      log.info(
+        `opik: exporting traces to project "${projectName}" (staleCleanup=${staleTraceCleanupEnabled ? "on" : "off"}, staleTimeoutMs=${staleTraceTimeoutMs}, staleSweepMs=${staleSweepIntervalMs}, flushRetryCount=${flushRetryCount}, flushRetryBaseDelayMs=${flushRetryBaseDelayMs})`,
+      );
+    },
+
+    async stop() {
+      traceDbg("service_lifecycle", { node: "service_stop_begin", activeTracesCount: activeTraces.size });
+      if (pluginInstanceReporter) {
+        await pluginInstanceReporter.stop();
+        pluginInstanceReporter = null;
+      }
+      cleanup?.();
+      cleanup = null;
+
+      // End all open traces before flushing.
+      for (const [sessionKey, active] of activeTraces) {
+        traceDbg("service_stop", { node: "closing_active_trace", sessionKey });
+        closeActiveTrace(active, `service stop sessionKey=${sessionKey}`);
+      }
+      activeTraces.clear();
+      sessionByAgentId.clear();
+      lastActiveSessionKey = undefined;
+
+      // Drain any already-scheduled flushes before the final flush.
+      await flushQueue.catch(() => undefined);
+      await attachmentUploader.waitForUploads();
+
+      if (client) {
+        await flushWithRetry("service stop");
+        client = null;
+      }
+      toolResultPersistSanitizeEnabled = false;
+
+      log.info(
+        `opik: exporter metrics flushSuccesses=${exporterMetrics.flushSuccesses} flushFailures=${exporterMetrics.flushFailures} flushRetries=${exporterMetrics.flushRetries} traceUpdateErrors=${exporterMetrics.traceUpdateErrors} traceEndErrors=${exporterMetrics.traceEndErrors} spanUpdateErrors=${exporterMetrics.spanUpdateErrors} spanEndErrors=${exporterMetrics.spanEndErrors}`,
+      );
+    },
+  };
+
+  return service;
+}

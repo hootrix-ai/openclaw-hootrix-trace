@@ -1,0 +1,34 @@
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { Opik, Span } from "hootrix";
+import type { ActiveTrace } from "../../types.js";
+type LlmHooksDeps = {
+    api: OpenClawPluginApi;
+    getClient: () => Opik | null;
+    activeTraces: Map<string, ActiveTrace>;
+    getTags: () => string[];
+    getProjectName: () => string;
+    rememberSessionCorrelation: (sessionKey: string, agentId?: unknown) => void;
+    closeActiveTrace: (active: ActiveTrace, reason: string) => void;
+    forgetSessionCorrelation: (sessionKey: string) => void;
+    applyContextMeta: (active: ActiveTrace, ctx: Record<string, unknown>, sessionKey?: string) => void;
+    resolveSessionKey: (ctx: Record<string, unknown>, sessionIdOverride?: string) => string | undefined;
+    safeSpanUpdate: (span: Span, payload: Record<string, unknown>, reason: string) => void;
+    safeSpanEnd: (span: Span, reason: string) => void;
+    scheduleMediaAttachmentUploads: (params: {
+        entityType: "trace" | "span";
+        entity: unknown;
+        projectName: string;
+        reason: string;
+        payloads: unknown[];
+    }) => void;
+    warn: (message: string) => void;
+    formatError: (err: unknown) => string;
+    cancelPendingFinalize: (sessionKey: string) => boolean;
+    getSubagentLineage: (childSessionKey: string) => {
+        parentTurnId: string;
+        anchorParentThreadId: string;
+    } | undefined;
+    forgetSubagentLineage: (childSessionKey: string) => void;
+};
+export declare function registerLlmHooks(deps: LlmHooksDeps): void;
+export {};

@@ -1,0 +1,88 @@
+import fs from "node:fs";
+import { Command } from "commander";
+import { describe, expect, test, vi } from "vitest";
+
+const emptyPluginConfigSchema = vi.hoisted(() =>
+  vi.fn(() => ({
+    jsonSchema: { type: "object", additionalProperties: false, properties: {} },
+    parse: (value: unknown) => value,
+  })),
+);
+
+vi.mock("hootrix", () => ({
+  disableLogger: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk", () => ({
+  emptyPluginConfigSchema,
+}));
+
+import plugin from "../index.js";
+
+describe("plugin smoke", () => {
+  test("registers service and CLI commands", () => {
+    const registerService = vi.fn();
+    const registerCli = vi.fn();
+    const on = vi.fn();
+
+    (plugin as any).register({
+      pluginConfig: { enabled: true },
+      on,
+      registerService,
+      registerCli,
+      runtime: {
+        config: {
+          current: () => ({}),
+          mutateConfigFile: async () => ({}),
+        },
+      },
+    } as any);
+
+    expect(registerService).toHaveBeenCalledTimes(1);
+    expect(registerService.mock.calls[0]?.[0]?.id).toBe("openclaw-hootrix-trace");
+    expect(on).toHaveBeenCalledWith("llm_input", expect.any(Function));
+    expect(on).toHaveBeenCalledWith("agent_end", expect.any(Function));
+
+    expect(registerCli).toHaveBeenCalledTimes(1);
+    expect(registerCli.mock.calls[0]?.[1]).toEqual({ commands: ["hootrix"] });
+
+    const registrar = registerCli.mock.calls[0]?.[0];
+    const program = new Command();
+    registrar({ program });
+
+    const hootrixCommand = program.commands.find((cmd) => cmd.name() === "hootrix");
+    expect(hootrixCommand).toBeDefined();
+    expect(hootrixCommand?.commands.map((cmd) => cmd.name())).toEqual(
+      expect.arrayContaining(["configure", "status"]),
+    );
+  });
+
+  test("manifest exposes expected config schema and ui hints", () => {
+    const manifestPath = new URL("../openclaw.plugin.json", import.meta.url);
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+    expect(manifest.id).toBe("openclaw-hootrix-trace");
+    expect(manifest.configSchema?.properties?.apiKey?.type).toBe("string");
+    expect(manifest.configSchema?.properties?.projectName?.type).toBe("string");
+    expect(manifest.uiHints?.apiKey?.sensitive).toBe(true);
+  });
+
+  test("package declares zod runtime dependency for packaged installs", () => {
+    const packageJsonPath = new URL("../package.json", import.meta.url);
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+
+    expect(packageJson.dependencies?.zod).toBeTruthy();
+  });
+
+  test("package declares built runtime entry for installed OpenClaw loads", () => {
+    const packageJsonPath = new URL("../package.json", import.meta.url);
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+
+    expect(packageJson.openclaw?.extensions).toEqual(["./index.ts"]);
+    expect(packageJson.openclaw?.runtimeExtensions).toEqual(["./dist/index.js"]);
+    expect(packageJson.openclaw?.compat?.pluginApi).toBeTruthy();
+    expect(packageJson.openclaw?.build?.openclawVersion).toBeTruthy();
+    expect(packageJson.files).toContain("dist/**");
+    expect(packageJson.scripts?.prepack).toBe("npm run build");
+  });
+});
