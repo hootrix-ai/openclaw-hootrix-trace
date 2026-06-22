@@ -111,7 +111,7 @@ export function scanAuditOnlyFindings(
         findings.push(buildAuditFinding(rule, matches, scanField));
       }
     } catch (err) {
-      console.error(`[Crabagent policy] audit scan failed rule=${rule.id} name=${rule.name ?? ""}`, err);
+      console.error(`[Hootrix policy] audit scan failed rule=${rule.id} name=${rule.name ?? ""}`, err);
     }
   }
   return findings;
@@ -128,7 +128,7 @@ export function compileRules(rules: ExtendedRedactionRule[]): Map<string, RegExp
       m.set(r.id, new RegExp(source, flags));
     } catch (err) {
       const preview = String(r.pattern ?? "").slice(0, 160);
-      console.error(`[Crabagent policy] compile failed rule=${r.id} patternPreview=${JSON.stringify(preview)}`, err);
+      console.error(`[Hootrix policy] compile failed rule=${r.id} patternPreview=${JSON.stringify(preview)}`, err);
     }
   }
   return m;
@@ -225,7 +225,7 @@ export function processTextSegment(
       });
       out = newStr;
     } catch (err) {
-      console.error(`[Crabagent policy] match failed rule=${rule.id} name=${rule.name ?? ""}`, err);
+      console.error(`[Hootrix policy] match failed rule=${rule.id} name=${rule.name ?? ""}`, err);
     } finally {
       try {
         re.lastIndex = 0;

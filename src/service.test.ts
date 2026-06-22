@@ -1595,6 +1595,57 @@ describe("opik service", () => {
       );
     });
 
+    test("subagent_spawned without subagent_spawning still links child trace to parent turn", async () => {
+      const { api, hooks } = createApi();
+      const parentTrace = opikState.createMockTrace();
+      const childTrace = opikState.createMockTrace();
+      const parentLlmSpan = opikState.createMockSpan();
+      const childLlmSpan = opikState.createMockSpan();
+      const subagentSpan = opikState.createMockSpan();
+
+      parentTrace.span.mockReturnValueOnce(parentLlmSpan).mockReturnValueOnce(subagentSpan);
+      childTrace.span.mockReturnValueOnce(childLlmSpan);
+      mockTraceFn.mockReturnValueOnce(parentTrace).mockReturnValueOnce(childTrace);
+
+      const service = createHootrixService(api as any);
+      await service.start(createServiceContext() as any);
+
+      const parentSession = "agent:main:feishu:group:oc_spawned-only";
+      const childSession = "agent:main:subagent:spawned-only-child";
+
+      invokeHook(
+        hooks,
+        "llm_input",
+        { model: "parent-model", provider: "p", prompt: "" },
+        agentCtx(parentSession, { agentId: "parent-agent" }),
+      );
+
+      invokeHook(
+        hooks,
+        "subagent_spawned",
+        { childSessionKey: childSession, agentId: "writer", mode: "run", runId: "run-spawned-only" },
+        { requesterSessionKey: parentSession, childSessionKey: childSession, runId: "run-spawned-only" },
+      );
+
+      invokeHook(
+        hooks,
+        "llm_input",
+        { model: "child-model", provider: "p", prompt: "" },
+        agentCtx(childSession, { agentId: "child-agent" }),
+      );
+
+      const childCreate = mockTraceFn.mock.calls[1]?.[0] as { metadata?: Record<string, string> };
+      expect(childCreate.metadata).toEqual(
+        expect.objectContaining({
+          trace_type: "subagent",
+          run_kind: "subagent",
+          parent_turn_id: parentTrace.data.id,
+          anchor_parent_thread_id: parentSession,
+          subagent_thread_id: childSession,
+        }),
+      );
+    });
+
     test("falls back via agentId when sessionKey is missing and multiple traces are active", async () => {
       const { api, hooks } = createApi();
       const traceA = opikState.createMockTrace();
@@ -1912,6 +1963,104 @@ describe("opik service", () => {
       );
       expect(grandchildSubagentSpan.end).toHaveBeenCalledTimes(1);
     });
+
+    test("subagent_ended closes bridge span after parent trace finalize while sibling still running", async () => {
+      vi.useFakeTimers();
+      const { api, hooks } = createApi();
+      const parentTrace = opikState.createMockTrace();
+      const announceTrace = opikState.createMockTrace();
+      const parentLlmSpan = opikState.createMockSpan();
+      const subagentSpanA = opikState.createMockSpan();
+      const subagentSpanB = opikState.createMockSpan();
+
+      parentTrace.span
+        .mockReturnValueOnce(parentLlmSpan)
+        .mockReturnValueOnce(subagentSpanA)
+        .mockReturnValueOnce(subagentSpanB);
+      mockTraceFn.mockReturnValueOnce(parentTrace).mockReturnValueOnce(announceTrace);
+
+      const service = createHootrixService(api as any);
+      await service.start(createServiceContext() as any);
+
+      const parentSession = "agent:main:feishu:direct:user-1";
+      const childA = "agent:main:subagent:child-a";
+      const childB = "agent:main:subagent:child-b";
+
+      invokeHook(
+        hooks,
+        "llm_input",
+        { model: "m", provider: "p", prompt: "" },
+        agentCtx(parentSession, { agentId: "main" }),
+      );
+      invokeHook(
+        hooks,
+        "subagent_spawned",
+        { childSessionKey: childA, agentId: "main", mode: "run", runId: "run-a" },
+        { requesterSessionKey: parentSession, childSessionKey: childA, runId: "run-a" },
+      );
+      invokeHook(
+        hooks,
+        "subagent_spawned",
+        { childSessionKey: childB, agentId: "main", mode: "run", runId: "run-b" },
+        { requesterSessionKey: parentSession, childSessionKey: childB, runId: "run-b" },
+      );
+
+      invokeHook(
+        hooks,
+        "subagent_ended",
+        {
+          targetSessionKey: childA,
+          targetKind: "subagent",
+          reason: "subagent-complete",
+          outcome: "ok",
+        },
+        { requesterSessionKey: parentSession, childSessionKey: childA, runId: "run-a" },
+      );
+      expect(subagentSpanA.end).toHaveBeenCalledTimes(1);
+
+      invokeHook(hooks, "agent_end", { success: true, durationMs: 100 }, agentCtx(parentSession));
+      await flushDeferredFinalize(150);
+      expect(parentTrace.end).toHaveBeenCalledTimes(1);
+
+      invokeHook(
+        hooks,
+        "llm_input",
+        {
+          model: "m",
+          provider: "p",
+          prompt: "announce child-b",
+          runId: "announce:v1:agent:main:subagent:child-b:run-b",
+        },
+        agentCtx(parentSession, { agentId: "main" }),
+      );
+      expect(mockTraceFn).toHaveBeenCalledTimes(2);
+
+      invokeHook(
+        hooks,
+        "subagent_ended",
+        {
+          targetSessionKey: childB,
+          targetKind: "subagent",
+          reason: "subagent-complete",
+          outcome: "ok",
+        },
+        { requesterSessionKey: parentSession, childSessionKey: childB, runId: "run-b" },
+      );
+
+      expect(subagentSpanB.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            status: "ended",
+            targetSessionKey: childB,
+            outcome: "ok",
+          }),
+        }),
+      );
+      expect(subagentSpanB.end).toHaveBeenCalledTimes(1);
+      expect(announceTrace.span).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: "subagent:subagent" }),
+      );
+    });
   });
 
   // =========================================================================
@@ -2013,7 +2162,7 @@ describe("opik service", () => {
       vi.useFakeTimers();
     });
 
-    test("only schedules attachments from the trailing final message", async () => {
+    test("schedules attachments from all agent_end messages", async () => {
       const { api, hooks } = createApi();
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
@@ -2039,7 +2188,11 @@ describe("opik service", () => {
 
       expect(mockScheduleMediaAttachmentUploads).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          payloads: [undefined, { role: "assistant", content: "clawcon" }],
+          payloads: [
+            undefined,
+            { role: "user", content: "Main character energy 🦉✨ media:/tmp/old-image.png" },
+            { role: "assistant", content: "clawcon" },
+          ],
         }),
       );
     });

@@ -1,6 +1,6 @@
 {
   "name": "openclaw-hootrix-trace",
-  "version": "1.0.4",
+  "version": "1.0.10",
   "license": "Apache-2.0",
   "description": "OpenClaw trace exporter — sends LLM traces to Hootrix",
   "repository": {
@@ -84,6 +84,7 @@
     "src/trace-logger.ts",
     "src/types.ts",
     "openclaw.plugin.json",
+    "public/logo.svg",
     "README.md",
     "LICENSE"
   ],

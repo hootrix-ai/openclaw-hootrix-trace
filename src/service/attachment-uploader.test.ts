@@ -2,17 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { Opik } from "hootrix";
 import {
-  ATTACHMENT_UPLOAD_PART_SIZE_BYTES,
-  LOCAL_ATTACHMENT_UPLOAD_MAGIC_ID,
-} from "./constants.js";
+  registerMediaRef,
+  resetMediaPlaceholderRegistry,
+} from "./attachment-placeholder-registry.js";
 import { createAttachmentUploader } from "./attachment-uploader.js";
-
-type MockAttachmentsApi = {
-  startMultiPartUpload: ReturnType<typeof vi.fn>;
-  completeMultiPartUpload: ReturnType<typeof vi.fn>;
-};
+import { sha256FileHex } from "./media-hash.js";
 
 async function createTempMediaFile(
   ext = ".png",
@@ -24,43 +19,48 @@ async function createTempMediaFile(
   return { dir, filePath };
 }
 
-function createAttachmentsApi(): MockAttachmentsApi {
-  return {
-    startMultiPartUpload: vi.fn(async () => ({
-      uploadId: LOCAL_ATTACHMENT_UPLOAD_MAGIC_ID,
-      preSignUrls: ["https://upload.example.com/file"],
-    })),
-    completeMultiPartUpload: vi.fn(async () => undefined),
-  };
-}
-
 describe("attachment uploader", () => {
   let tempDirs: string[] = [];
+  const fetchMock = vi.fn();
 
   beforeEach(() => {
     tempDirs = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(null, { status: 200, headers: { etag: "etag-1" } })),
-    );
+    resetMediaPlaceholderRegistry();
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(async () => {
     vi.unstubAllGlobals();
+    resetMediaPlaceholderRegistry();
     await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
-  test("encodes attachment path with URL-safe base64", async () => {
+  test("uses upsert and skips PUT when attachment is referenced", async () => {
     const { dir, filePath } = await createTempMediaFile();
     tempDirs.push(dir);
+    const contentHash = await sha256FileHex(filePath);
 
-    const attachmentsApi = createAttachmentsApi();
-    const client = { api: { attachments: attachmentsApi } };
-    const baseUrl = "https://foo.bar/opik?a=1";
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: "referenced",
+          attachment_id: "att-ref",
+          canonical_attachment_id: "att-primary",
+          file_name: "sample.png",
+          file_size: 10,
+          content_hash: contentHash,
+          upload_kind: "reference",
+          placeholder: `[media-ref:${contentHash.slice(0, 16)}:sample.png]`,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
 
     const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => baseUrl,
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "http://127.0.0.1:9823",
       onWarn: () => undefined,
       formatError: (err) => String(err),
     });
@@ -74,108 +74,68 @@ describe("attachment uploader", () => {
     });
     await uploader.waitForUploads();
 
-    const request = attachmentsApi.startMultiPartUpload.mock.calls[0]?.[0] as { path: string };
-    expect(request.path).toBe(Buffer.from(baseUrl, "utf8").toString("base64url"));
-    expect(request.path.includes("/")).toBe(false);
-    expect(request.path.includes("+")).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:9823/v1/private/attachment/upsert");
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(String(init.body)) as { content_hash: string; source_ref: string };
+    expect(body.content_hash).toBe(contentHash);
+    expect(body.source_ref).toBe(filePath);
   });
 
-  test("uses a bounded uploaded-key cache to avoid unbounded growth", async () => {
-    const first = await createTempMediaFile();
-    const second = await createTempMediaFile();
-    const third = await createTempMediaFile();
-    tempDirs.push(first.dir, second.dir, third.dir);
-
-    const attachmentsApi = createAttachmentsApi();
-    const client = { api: { attachments: attachmentsApi } };
-
-    const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => "https://www.comet.com/opik/api",
-      onWarn: () => undefined,
-      formatError: (err) => String(err),
-      uploadedAttachmentCacheMaxKeys: 2,
-    });
-
-    for (const filePath of [first.filePath, second.filePath, third.filePath]) {
-      uploader.scheduleMediaAttachmentUploads({
-        entityType: "trace",
-        entity: { id: "trace-1" },
-        projectName: "openclaw",
-        reason: "test",
-        payloads: [`media:${filePath}`],
-      });
-      await uploader.waitForUploads();
-    }
-    expect(attachmentsApi.startMultiPartUpload).toHaveBeenCalledTimes(3);
-
-    uploader.scheduleMediaAttachmentUploads({
-      entityType: "trace",
-      entity: { id: "trace-1" },
-      projectName: "openclaw",
-      reason: "test",
-      payloads: [`media:${first.filePath}`],
-    });
-    await uploader.waitForUploads();
-    expect(attachmentsApi.startMultiPartUpload).toHaveBeenCalledTimes(4);
-
-    uploader.scheduleMediaAttachmentUploads({
-      entityType: "trace",
-      entity: { id: "trace-1" },
-      projectName: "openclaw",
-      reason: "test",
-      payloads: [`media:${third.filePath}`],
-    });
-    await uploader.waitForUploads();
-    expect(attachmentsApi.startMultiPartUpload).toHaveBeenCalledTimes(4);
-  });
-
-  test("does not cache a key when attachments API is unavailable", async () => {
+  test("PUTs bytes after upload_required upsert", async () => {
     const { dir, filePath } = await createTempMediaFile();
     tempDirs.push(dir);
+    const contentHash = await sha256FileHex(filePath);
 
-    const attachmentsApi = createAttachmentsApi();
-    let client: { api?: { attachments?: MockAttachmentsApi } } = { api: {} };
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "upload_required",
+            attachment_id: "att-new",
+            file_name: "sample.png",
+            file_size: 10,
+            content_hash: contentHash,
+            upload_kind: "primary",
+            placeholder: `[media-ref:${contentHash.slice(0, 16)}:sample.png]`,
+            upload_url: "http://127.0.0.1:9823/v1/private/attachment/upload?upload_token=tok",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => "https://www.comet.com/opik/api",
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "http://127.0.0.1:9823",
       onWarn: () => undefined,
       formatError: (err) => String(err),
     });
 
     uploader.scheduleMediaAttachmentUploads({
-      entityType: "trace",
-      entity: { id: "trace-1" },
+      entityType: "span",
+      entity: { id: "span-1" },
       projectName: "openclaw",
-      reason: "no-api",
+      traceId: "trace-1",
+      reason: "test",
       payloads: [`media:${filePath}`],
     });
     await uploader.waitForUploads();
-    expect(attachmentsApi.startMultiPartUpload).not.toHaveBeenCalled();
 
-    client = { api: { attachments: attachmentsApi } };
-    uploader.scheduleMediaAttachmentUploads({
-      entityType: "trace",
-      entity: { id: "trace-1" },
-      projectName: "openclaw",
-      reason: "api-ready",
-      payloads: [`media:${filePath}`],
-    });
-    await uploader.waitForUploads();
-    expect(attachmentsApi.startMultiPartUpload).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe("PUT");
   });
 
   test("does not upload incidental media paths embedded in plain text", async () => {
     const { dir, filePath } = await createTempMediaFile();
     tempDirs.push(dir);
 
-    const attachmentsApi = createAttachmentsApi();
-    const client = { api: { attachments: attachmentsApi } };
-
     const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => "https://www.comet.com/opik/api",
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "http://127.0.0.1:9823",
       onWarn: () => undefined,
       formatError: (err) => String(err),
     });
@@ -189,89 +149,17 @@ describe("attachment uploader", () => {
     });
     await uploader.waitForUploads();
 
-    expect(attachmentsApi.startMultiPartUpload).not.toHaveBeenCalled();
-  });
-
-  test("does not upload direct path values without an explicit local-media marker", async () => {
-    const { dir, filePath } = await createTempMediaFile();
-    tempDirs.push(dir);
-
-    const attachmentsApi = createAttachmentsApi();
-    const client = { api: { attachments: attachmentsApi } };
-
-    const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => "https://www.comet.com/opik/api",
-      onWarn: () => undefined,
-      formatError: (err) => String(err),
-    });
-
-    uploader.scheduleMediaAttachmentUploads({
-      entityType: "trace",
-      entity: { id: "trace-1" },
-      projectName: "openclaw",
-      reason: "direct-path-value",
-      payloads: [filePath],
-    });
-    await uploader.waitForUploads();
-
-    expect(attachmentsApi.startMultiPartUpload).not.toHaveBeenCalled();
-  });
-
-  test("uploads multipart attachments without loading the whole file into one request body", async () => {
-    const largeContents = Buffer.alloc(ATTACHMENT_UPLOAD_PART_SIZE_BYTES + 32, 0x61);
-    const { dir, filePath } = await createTempMediaFile(".png", largeContents);
-    tempDirs.push(dir);
-
-    const attachmentsApi = {
-      startMultiPartUpload: vi.fn(async () => ({
-        uploadId: "upload-1",
-        preSignUrls: ["https://upload.example.com/part-1", "https://upload.example.com/part-2"],
-      })),
-      completeMultiPartUpload: vi.fn(async () => undefined),
-    };
-    const client = { api: { attachments: attachmentsApi } };
-
-    const fetchMock = vi.fn(async () => new Response(null, { status: 200, headers: { etag: "etag" } }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => "https://www.comet.com/opik/api",
-      onWarn: () => undefined,
-      formatError: (err) => String(err),
-    });
-
-    uploader.scheduleMediaAttachmentUploads({
-      entityType: "trace",
-      entity: { id: "trace-1" },
-      projectName: "openclaw",
-      reason: "multipart",
-      payloads: [`media:${filePath}`],
-    });
-    await uploader.waitForUploads();
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const fetchCalls = fetchMock.mock.calls as unknown as Array<[string, RequestInit | undefined]>;
-    const firstBody = fetchCalls[0]?.[1]?.body;
-    const secondBody = fetchCalls[1]?.[1]?.body;
-    expect(firstBody).toBeInstanceOf(Blob);
-    expect(secondBody).toBeInstanceOf(Blob);
-    expect((firstBody as Blob).size).toBe(ATTACHMENT_UPLOAD_PART_SIZE_BYTES);
-    expect((secondBody as Blob).size).toBe(32);
-    expect(attachmentsApi.completeMultiPartUpload).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("skips uploads when attachment uploads are disabled", async () => {
     const { dir, filePath } = await createTempMediaFile();
     tempDirs.push(dir);
 
-    const attachmentsApi = createAttachmentsApi();
-    const client = { api: { attachments: attachmentsApi } };
-
     const uploader = createAttachmentUploader({
-      getClient: () => client as unknown as Opik,
-      getAttachmentBaseUrl: () => "https://www.comet.com/opik/api",
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "http://127.0.0.1:9823",
       onWarn: () => undefined,
       formatError: (err) => String(err),
       attachmentsEnabled: false,
@@ -286,6 +174,176 @@ describe("attachment uploader", () => {
     });
     await uploader.waitForUploads();
 
-    expect(attachmentsApi.startMultiPartUpload).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("rewrites upload URL with collector API path prefix", async () => {
+    const { dir, filePath } = await createTempMediaFile();
+    tempDirs.push(dir);
+    const contentHash = await sha256FileHex(filePath);
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "upload_required",
+            attachment_id: "att-new",
+            file_name: "sample.png",
+            file_size: 10,
+            content_hash: contentHash,
+            upload_kind: "primary",
+            placeholder: `[media-ref:${contentHash.slice(0, 16)}:sample.png]`,
+            upload_url: "https://trace.example.com/v1/private/attachment/upload?upload_token=tok",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const uploader = createAttachmentUploader({
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "https://trace.example.com/app/api",
+      onWarn: () => undefined,
+      formatError: (err) => String(err),
+    });
+
+    uploader.scheduleMediaAttachmentUploads({
+      entityType: "span",
+      entity: { id: "span-1" },
+      projectName: "openclaw",
+      reason: "prefix",
+      payloads: [`media:${filePath}`],
+    });
+    await uploader.waitForUploads();
+
+    const putUrl = fetchMock.mock.calls[1]?.[0] as string;
+    expect(putUrl).toContain("/app/api/v1/private/attachment/upload");
+  });
+
+  test("binds reference attachment on a second entity with the same content hash", async () => {
+    const { dir, filePath } = await createTempMediaFile();
+    tempDirs.push(dir);
+    const contentHash = await sha256FileHex(filePath);
+    const placeholder = `[media-ref:${contentHash.slice(0, 16)}:sample.png]`;
+
+    registerMediaRef(filePath, {
+      placeholder,
+      contentHash,
+      fileName: "sample.png",
+      fileSize: 10,
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: "referenced",
+          attachment_id: "att-tool-ref",
+          canonical_attachment_id: "att-primary",
+          file_name: "sample.png",
+          file_size: 10,
+          content_hash: contentHash,
+          upload_kind: "reference",
+          placeholder,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const uploader = createAttachmentUploader({
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "http://127.0.0.1:9823",
+      onWarn: () => undefined,
+      formatError: (err) => String(err),
+    });
+
+    uploader.scheduleMediaAttachmentUploads({
+      entityType: "span",
+      entity: { id: "tool-span-1" },
+      projectName: "openclaw",
+      traceId: "trace-1",
+      reason: "tool media-ref bind",
+      payloads: [{ image: placeholder }],
+    });
+    await uploader.waitForUploads();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      entity_id: string;
+      content_hash: string;
+    };
+    expect(body.entity_id).toBe("tool-span-1");
+    expect(body.content_hash).toBe(contentHash);
+  });
+
+  test("uploads the same hash to another entity after primary upload", async () => {
+    const { dir, filePath } = await createTempMediaFile(".png", "same-bytes");
+    tempDirs.push(dir);
+    const contentHash = await sha256FileHex(filePath);
+    const placeholder = `[media-ref:${contentHash.slice(0, 16)}:sample.png]`;
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "upload_required",
+            attachment_id: "att-primary",
+            file_name: "sample.png",
+            file_size: 10,
+            content_hash: contentHash,
+            upload_kind: "primary",
+            placeholder,
+            upload_url: "http://127.0.0.1:9823/v1/private/attachment/upload?upload_token=tok1",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "referenced",
+            attachment_id: "att-tool-ref",
+            canonical_attachment_id: "att-primary",
+            file_name: "sample.png",
+            file_size: 10,
+            content_hash: contentHash,
+            upload_kind: "reference",
+            placeholder,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+    const uploader = createAttachmentUploader({
+      getApiKey: () => "test-key",
+      getWorkspaceName: () => "default",
+      getAttachmentBaseUrl: () => "http://127.0.0.1:9823",
+      onWarn: () => undefined,
+      formatError: (err) => String(err),
+    });
+
+    uploader.scheduleMediaAttachmentUploads({
+      entityType: "span",
+      entity: { id: "llm-span-1" },
+      projectName: "openclaw",
+      reason: "llm upload",
+      payloads: [`media:${filePath}`],
+    });
+    uploader.scheduleMediaAttachmentUploads({
+      entityType: "span",
+      entity: { id: "tool-span-1" },
+      projectName: "openclaw",
+      reason: "tool upload",
+      payloads: [`media:${filePath}`],
+    });
+    await uploader.waitForUploads();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const secondUpsertBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as {
+      entity_id: string;
+    };
+    expect(secondUpsertBody.entity_id).toBe("tool-span-1");
   });
 });

@@ -24,6 +24,18 @@ describe("resolveTraceClassification", () => {
     expect(c.capabilities.allowFinalizeReuse).toBe(false);
   });
 
+  test("classifies subagent announce on host thread as external/subagent_announce", () => {
+    const c = resolveTraceClassification({
+      sessionKey: "agent:main:feishu:direct:user",
+      runId:
+        "announce:v1:agent:main:subagent:eeb1b54d-4660-44e5-8533-e3227ba0769c:c92aefff-afbe-4c70-b4a2-a7e4dea3c3e4",
+      trigger: "user",
+    });
+    expect(c.traceType).toBe("external");
+    expect(c.runKind).toBe("subagent_announce");
+    expect(c.capabilities.allowFinalizeReuse).toBe(true);
+  });
+
   test("classifies system compaction prompts", () => {
     const c = resolveTraceClassification({
       sessionKey: "agent:main:feishu:direct:user",

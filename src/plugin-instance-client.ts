@@ -21,7 +21,17 @@ const INSTANCE_ID_DIR = join(
   process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || "/tmp",
   ".openclaw",
 );
-const INSTANCE_ID_FILE = join(INSTANCE_ID_DIR, "hootrix-plugin-instance-id");
+function instanceIdScope(apiKey?: string): string {
+  const key = apiKey?.trim();
+  if (!key) {
+    return "default";
+  }
+  return createHash("sha256").update(key).digest("hex").slice(0, 12);
+}
+
+function instanceIdFilePath(apiKey?: string): string {
+  return join(INSTANCE_ID_DIR, `hootrix-plugin-instance-id-${instanceIdScope(apiKey)}`);
+}
 
 export type PluginSystemInfo = {
   platform: string;
@@ -161,11 +171,12 @@ export function collectPluginSystemInfo(host: string): PluginSystemInfo {
   };
 }
 
-/** Stable per-machine instance id persisted under ~/.openclaw/. */
-export function getOrCreatePluginInstanceId(): string {
+/** Stable per-machine + per-account instance id persisted under ~/.openclaw/. */
+export function getOrCreatePluginInstanceId(apiKey?: string): string {
+  const instanceIdFile = instanceIdFilePath(apiKey);
   try {
-    if (existsSync(INSTANCE_ID_FILE)) {
-      const existing = readFileSync(INSTANCE_ID_FILE, "utf8").trim();
+    if (existsSync(instanceIdFile)) {
+      const existing = readFileSync(instanceIdFile, "utf8").trim();
       if (existing.length > 0) {
         return existing;
       }
@@ -177,7 +188,7 @@ export function getOrCreatePluginInstanceId(): string {
   const id = `${host}-${createHash("sha256").update(host + HOOTRIX_PLUGIN_ID).digest("hex").slice(0, 12)}-${randomUUID().slice(0, 8)}`;
   try {
     mkdirSync(INSTANCE_ID_DIR, { recursive: true });
-    writeFileSync(INSTANCE_ID_FILE, id, "utf8");
+    writeFileSync(instanceIdFile, id, "utf8");
   } catch {
     // still return ephemeral id for this process
   }
@@ -272,7 +283,7 @@ export function startPluginInstanceReporter(params: {
   workspaceName: string;
   agentCount: () => number;
 }): PluginInstanceReporter {
-  const instanceId = getOrCreatePluginInstanceId();
+  const instanceId = getOrCreatePluginInstanceId(params.config.apiKey);
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
 

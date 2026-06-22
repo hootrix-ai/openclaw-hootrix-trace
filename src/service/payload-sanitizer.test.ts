@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { sanitizeStringForHootrix, sanitizeValueForHootrix } from "./payload-sanitizer.js";
+import {
+  buildSanitizedLlmInputFromEvent,
+  sanitizeStringForHootrix,
+  sanitizeValueForHootrix,
+} from "./payload-sanitizer.js";
 
 describe("payload-sanitizer", () => {
   test("redacts internal Slack/OpenClaw metadata wrappers and reply markers", () => {
@@ -30,5 +34,30 @@ describe("payload-sanitizer", () => {
     expect(sanitized.text).toBe("before after");
     expect(sanitized.nested.notes).toBe("");
     expect(sanitized.images).toEqual(["media:<image-ref>", "media:<image-ref>"]);
+  });
+
+  describe("buildSanitizedLlmInputFromEvent", () => {
+    test("omits historyMessages when absent or empty", () => {
+      expect(buildSanitizedLlmInputFromEvent({ prompt: "hi" })).toEqual({ prompt: "hi" });
+      expect(
+        buildSanitizedLlmInputFromEvent({
+          prompt: "hi",
+          historyMessages: [],
+        }),
+      ).toEqual({ prompt: "hi" });
+    });
+
+    test("includes historyMessages when OpenClaw sends non-empty history", () => {
+      const out = buildSanitizedLlmInputFromEvent({
+        prompt: "hi",
+        historyMessages: [{ role: "user", content: "prev" }],
+      });
+      expect(out.historyMessages).toEqual([{ role: "user", content: "prev" }]);
+    });
+
+    test("only includes fields OpenClaw provided", () => {
+      expect(buildSanitizedLlmInputFromEvent({ imagesCount: 0 })).toEqual({ imagesCount: 0 });
+      expect(buildSanitizedLlmInputFromEvent({})).toEqual({});
+    });
   });
 });

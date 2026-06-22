@@ -47,6 +47,23 @@ function looksLikeAsyncMetadata(meta: Record<string, unknown>): boolean {
   return false;
 }
 
+/** OpenClaw subagent completion announces reuse announce:* runIds on the host thread. */
+export function looksLikeSubagentAnnounceRun(
+  runId: string | undefined,
+  meta?: Record<string, unknown>,
+): boolean {
+  const id =
+    (runId?.trim() ||
+      asNonEmptyString(meta?.runId) ||
+      asNonEmptyString(meta?.run_id) ||
+      "").toLowerCase();
+  if (!id) return false;
+  if (!id.startsWith("announce:") && !id.startsWith("announce/")) return false;
+  if (id.includes(":subagent:")) return true;
+  if (id.includes("subagent_announce")) return true;
+  return false;
+}
+
 function capabilitiesFor(traceType: string): TraceClassificationCapabilities {
   switch (traceType) {
     case "subagent":
@@ -143,6 +160,14 @@ export function resolveTraceClassification(params: {
       runKind: "system",
       traceKind: traceKindRaw,
       capabilities: capabilitiesFor("system"),
+    };
+  }
+
+  if (looksLikeSubagentAnnounceRun(runId, meta)) {
+    return {
+      traceType: "external",
+      runKind: "subagent_announce",
+      capabilities: capabilitiesFor("external"),
     };
   }
 

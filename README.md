@@ -1,7 +1,7 @@
 <h1 align="center" style="border-bottom: none">
   <div>
     <a href="https://www.hootrix.com"  target="_blank">
-      <img alt="Hootrix logo" src="public/hootrix_with_title_logo.svg" width="200" />
+      <img alt="Hootrix logo" src="https://unpkg.com/openclaw-hootrix-trace/public/logo.svg" height="60" />
     </a>
     <br />
     🔭 OpenClaw Hootrix Observability Plugin
