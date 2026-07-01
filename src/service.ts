@@ -48,9 +48,11 @@ import {
 import { setOpenClawStateDir } from "./service/media.js";
 import { sanitizeStringForHootrix, sanitizeValueForHootrix } from "./service/payload-sanitizer.js";
 import { collectorFetch } from "./collector-fetch.js";
+import {
+  directPatchTrace,
+  type CollectorExportConfig,
+} from "./direct-collector-export.js";
 import { parseHootrixPluginConfig, type ActiveTrace, type HootrixPluginConfig } from "./types.js";
-import { refreshSageExperiment } from "./service/sage-client.js";
-import { parseExperimentIdFromTags } from "./service/sage-experiment.js";
 import { getHootrixPluginEntry } from "./configure.js";
 import {
   startPluginInstanceReporter,
@@ -84,15 +86,12 @@ let staleTraceCleanupEnabled = true;
 let flushRetryCount = DEFAULT_FLUSH_RETRY_COUNT;
 let flushRetryBaseDelayMs = DEFAULT_FLUSH_RETRY_BASE_DELAY_MS;
 let attachmentBaseUrl = DEFAULT_ATTACHMENT_BASE_URL;
+let collectorDirectExportBaseUrl: string | undefined;
 let currentApiKey: string | undefined;
 let currentWorkspaceName = "default";
 let currentProjectName = "openclaw";
 let currentTags = ["openclaw"];
 let toolResultPersistSanitizeEnabled = false;
-let sageEnabled = false;
-let sageMainApiUrl = "http://127.0.0.1:9821";
-let sageAutoRefreshExperiment = true;
-let sageApiKey: string | undefined;
 let flushQueue: Promise<void> = Promise.resolve();
 // 延迟 finalize 机制：用于合并 fallback 场景的多个 LLM 调用到同一个 trace
 const pendingFinalizes = new Map<string, ReturnType<typeof setTimeout>>();
@@ -138,15 +137,12 @@ function resetSharedRuntimeState(): void {
   flushRetryCount = DEFAULT_FLUSH_RETRY_COUNT;
   flushRetryBaseDelayMs = DEFAULT_FLUSH_RETRY_BASE_DELAY_MS;
   attachmentBaseUrl = DEFAULT_ATTACHMENT_BASE_URL;
+  collectorDirectExportBaseUrl = undefined;
   currentApiKey = undefined;
   currentWorkspaceName = "default";
   currentProjectName = "openclaw";
   currentTags = ["openclaw"];
   toolResultPersistSanitizeEnabled = false;
-  sageEnabled = false;
-  sageMainApiUrl = "http://127.0.0.1:9821";
-  sageAutoRefreshExperiment = true;
-  sageApiKey = undefined;
   flushQueue = Promise.resolve();
   pendingFinalizes.clear();
   pendingSubagentLineage.clear();
@@ -489,11 +485,23 @@ export function createHootrixService(
     }
   }
 
-  function scheduleFlush(reason: string): void {
+  function enqueueFlush(reason: string): Promise<void> {
     traceDbg("flush", { node: "schedule_flush", reason });
-    flushQueue = flushQueue.then(() => flushWithRetry(reason)).catch((err) => {
-      traceDbg("flush", { node: "flush_queue_error", error: formatError(err) });
-    });
+    const task = flushQueue
+      .then(() => flushWithRetry(reason))
+      .catch((err) => {
+        traceDbg("flush", { node: "flush_queue_error", error: formatError(err) });
+      });
+    flushQueue = task.then(() => undefined);
+    return task;
+  }
+
+  function scheduleFlush(reason: string): void {
+    void enqueueFlush(reason);
+  }
+
+  function awaitFlush(reason: string): Promise<void> {
+    return enqueueFlush(reason);
   }
 
   function trimOrUndefined(value: string | undefined): string | undefined {
@@ -555,10 +563,23 @@ export function createHootrixService(
     }
   }
 
-  /** Consolidate output + metadata into a single trace.update() + trace.end(). */
-  function finalizeTrace(sessionKey: string): void {
+  function getCollectorExportConfig(): CollectorExportConfig | null {
+    if (!currentApiKey?.trim() || !collectorDirectExportBaseUrl) {
+      return null;
+    }
+    return {
+      baseUrl: collectorDirectExportBaseUrl,
+      apiKey: currentApiKey.trim(),
+      workspaceName: currentWorkspaceName.trim() || "default",
+    };
+  }
+
+  /** Consolidate output + metadata into a single trace.update() (includes endTime). */
+  async function finalizeTrace(sessionKey: string): Promise<void> {
     const active = activeTraces.get(sessionKey);
     if (!active) return;
+
+    await awaitFlush(`finalize pre-export sessionKey=${sessionKey}`);
 
     // End any remaining open child spans (LLM span if llm_output didn't fire).
     // Keep subagent bridge spans open while child sessions may still be running.
@@ -598,7 +619,6 @@ export function createHootrixService(
       ...(active.agentId ? { agentId: active.agentId } : {}),
       ...finChannelMeta,
       ...(active.trigger ? { trigger: active.trigger } : {}),
-      ...(active.experimentId ? { "hootrix.experiment_id": active.experimentId } : {}),
     };
 
     // Prefer accumulated llm_output usage, fall back to diagnostic costMeta usage.
@@ -636,6 +656,8 @@ export function createHootrixService(
     safeTraceUpdate(
       active.trace,
       {
+        threadId: sessionKey,
+        ...(active.lastLlmInput ? { input: active.lastLlmInput } : {}),
         ...(output ? { output } : {}),
         metadata: {
           ...metadata,
@@ -645,33 +667,44 @@ export function createHootrixService(
           ...(active.llmError?.stopReason ? { llmStopReason: active.llmError.stopReason } : {}),
         },
         ...(errorInfo ? { errorInfo } : {}),
+        endTime: new Date(),
       },
       `finalize sessionKey=${sessionKey}`,
     );
 
-    safeTraceEnd(active.trace, `finalize sessionKey=${sessionKey}`);
-    const experimentId =
-      active.experimentId ?? parseExperimentIdFromTags(currentTags);
+    const exportCfg = getCollectorExportConfig();
+    const finalizeTraceId = active.traceId ?? resolveTraceId(active.trace);
+    if (exportCfg && finalizeTraceId) {
+      try {
+        await directPatchTrace({
+          config: exportCfg,
+          traceId: finalizeTraceId,
+          patch: {
+            threadId: sessionKey,
+            ...(active.lastLlmInput ? { input: active.lastLlmInput } : {}),
+            ...(output ? { output } : {}),
+            metadata: {
+              ...metadata,
+              hasLlmError: !!active.llmError,
+              ...(active.llmError?.model ? { llmErrorModel: active.llmError.model } : {}),
+              ...(active.llmError?.stopReason ? { llmStopReason: active.llmError.stopReason } : {}),
+            },
+            ...(errorInfo ? { errorInfo } : {}),
+            endTime: new Date(),
+          },
+        });
+      } catch (err) {
+        log.warn(
+          `hootrix: direct trace patch on finalize failed (sessionKey=${sessionKey}): ${formatError(err)}`,
+        );
+      }
+    }
+
     // Keep bridge-span host lookups alive until subagent_ended closes each child.
     forgetSubagentSpanHostsByActiveIfClosed(active);
     activeTraces.delete(sessionKey);
     forgetSessionCorrelation(sessionKey);
-    scheduleFlush(`trace-finalized sessionKey=${sessionKey}`);
-    if (sageEnabled && sageAutoRefreshExperiment && experimentId && sageApiKey) {
-      const apiKey = sageApiKey;
-      flushQueue = flushQueue
-        .then(async () => {
-          traceDbg("sage_experiment", { node: "refresh_after_finalize", experimentId, sessionKey });
-          await refreshSageExperiment({
-            mainApiUrl: sageMainApiUrl,
-            apiKey,
-            experimentId,
-          });
-        })
-        .catch((err) => {
-          log.warn(`hootrix-sage: experiment refresh failed (${experimentId}): ${formatError(err)}`);
-        });
-    }
+    await awaitFlush(`trace-finalized sessionKey=${sessionKey}`);
   }
 
   function registerHooks(): void {
@@ -716,6 +749,9 @@ export function createHootrixService(
       cancelPendingFinalize,
       getSubagentLineage,
       forgetSubagentLineage,
+      scheduleFlush,
+      awaitFlush,
+      getCollectorExportConfig,
     });
     traceDbg("hooks_registration", { node: "llm_hooks_registered" });
 
@@ -736,6 +772,8 @@ export function createHootrixService(
       getProjectName: () => currentProjectName,
       warn: (message) => log.warn(message),
       formatError,
+      getCollectorExportConfig,
+      awaitFlush,
     });
     traceDbg("hooks_registration", { node: "tool_hooks_registered" });
 
@@ -755,6 +793,8 @@ export function createHootrixService(
       safeSpanUpdate,
       safeSpanEnd,
       safeTraceUpdate,
+      getCollectorExportConfig,
+      awaitFlush,
       warn: (message) => log.warn(message),
       formatError,
     });
@@ -841,7 +881,7 @@ export function createHootrixService(
         const current = activeTraces.get(sessionKey);
         if (current && current.trace === active.trace) {
           traceDbg("trace_lifecycle", { node: "delayed_finalize_executing", sessionKey, delayMs: FALLBACK_FINALIZE_DELAY_MS });
-          finalizeTrace(sessionKey);
+          void finalizeTrace(sessionKey);
         }
       }, FALLBACK_FINALIZE_DELAY_MS);
 
@@ -907,12 +947,11 @@ export function createHootrixService(
       currentTags = tags;
       currentApiKey = apiKey?.trim() || undefined;
       currentWorkspaceName = workspaceName;
+      collectorDirectExportBaseUrl = apiUrl?.trim()
+        ? apiUrl.trim().replace(/\/+$/, "")
+        : undefined;
       attachmentBaseUrl = (apiUrl ?? DEFAULT_ATTACHMENT_BASE_URL).replace(/\/+$/, "");
       toolResultPersistSanitizeEnabled = hootrixCfg.toolResultPersistSanitizeEnabled === true;
-      sageEnabled = hootrixCfg.sageEnabled === true;
-      sageMainApiUrl = hootrixCfg.mainApiUrl?.trim() || "http://127.0.0.1:9821";
-      sageAutoRefreshExperiment = hootrixCfg.sageAutoRefreshExperiment !== false;
-      sageApiKey = apiKey?.trim() || undefined;
 
       staleTraceCleanupEnabled = hootrixCfg.staleTraceCleanupEnabled !== false;
       staleTraceTimeoutMs = Math.max(

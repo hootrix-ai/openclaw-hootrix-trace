@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { Opik as HootrixClient, Span, Trace } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
+import { type CollectorExportConfig } from "../../direct-collector-export.js";
 type ToolHooksDeps = {
     api: OpenClawPluginApi;
     getClient: () => HootrixClient | null;
@@ -28,6 +29,8 @@ type ToolHooksDeps = {
     getProjectName: () => string;
     warn: (message: string) => void;
     formatError: (err: unknown) => string;
+    getCollectorExportConfig: () => CollectorExportConfig | null;
+    awaitFlush: (reason: string) => Promise<void>;
 };
 export declare function registerToolHooks(deps: ToolHooksDeps): void;
 export {};

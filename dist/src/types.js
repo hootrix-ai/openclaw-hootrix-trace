@@ -48,9 +48,7 @@ function looksLikeHootrixPluginConfig(o) {
         "staleTraceTimeoutMs" in o ||
         "staleSweepIntervalMs" in o ||
         "flushRetryCount" in o ||
-        "flushRetryBaseDelayMs" in o ||
-        "sageEnabled" in o ||
-        "mainApiUrl" in o);
+        "flushRetryBaseDelayMs" in o);
 }
 function shouldUseEmbeddedPluginConfig(nested) {
     if (Object.keys(nested).length === 0)
@@ -142,9 +140,5 @@ export function parseHootrixPluginConfig(raw) {
         flushRetryCount: asOptionalNumber(cfg.flushRetryCount),
         flushRetryBaseDelayMs: asOptionalNumber(cfg.flushRetryBaseDelayMs),
         policySyncIntervalMs,
-        sageEnabled: parseOptionalBoolean(cfg.sageEnabled),
-        mainApiUrl: asOptionalTrimmedString(cfg.mainApiUrl) ??
-            asOptionalTrimmedString(process.env.HOOTRIX_MAIN_API_URL),
-        sageAutoRefreshExperiment: parseOptionalBoolean(cfg.sageAutoRefreshExperiment),
     };
 }

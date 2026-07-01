@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { Opik as HootrixClient, Span, Trace } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
+import { type CollectorExportConfig } from "../../direct-collector-export.js";
 type LlmHooksDeps = {
     api: OpenClawPluginApi;
     getClient: () => HootrixClient | null;
@@ -31,6 +32,9 @@ type LlmHooksDeps = {
         anchorParentThreadId: string;
     } | undefined;
     forgetSubagentLineage: (childSessionKey: string) => void;
+    scheduleFlush: (reason: string) => void;
+    awaitFlush: (reason: string) => Promise<void>;
+    getCollectorExportConfig: () => CollectorExportConfig | null;
 };
 export declare function registerLlmHooks(deps: LlmHooksDeps): void;
 export {};

@@ -32,7 +32,6 @@ const filesToCopy = [
   "src/service/payload-sanitizer.ts",
   "src/service/media.ts",
   "src/service/attachment-uploader.ts",
-  "src/service/trace-ndjson-log.ts",
   "src/service/hooks/gateway.ts",
   "src/service/hooks/llm.ts",
   "src/service/hooks/tool.ts",

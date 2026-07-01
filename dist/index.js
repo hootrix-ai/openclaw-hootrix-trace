@@ -1,3 +1,29 @@
-// @openclaw-dev-loader — re-exports repo-root TypeScript; edit src/ and restart Gateway (no rebuild).
-export { default } from "../index.ts";
-
+import { definePluginEntry, } from "openclaw/plugin-sdk/plugin-entry";
+import { registerHootrixCli } from "./src/cli.js";
+import { createHootrixService } from "./src/service.js";
+import { parseHootrixPluginConfig } from "./src/types.js";
+import { HOOTRIX_PLUGIN_ID } from "./src/constants.js";
+import { createTraceLogger, traceDbg } from "./src/trace-logger.js";
+export default definePluginEntry({
+    id: HOOTRIX_PLUGIN_ID,
+    name: "Hootrix",
+    description: "Export LLM traces and spans to hootrix for observability",
+    register(api) {
+        const pluginConfig = parseHootrixPluginConfig(api.pluginConfig);
+        // initialize log - use api.logger to ensure logs are output correctly by openclaw
+        createTraceLogger({
+            debug: pluginConfig.debug ?? false,
+            logger: api.logger,
+        });
+        const service = createHootrixService(api, pluginConfig);
+        service.registerHooks();
+        api.registerService(service);
+        api.registerCli(({ program }) => registerHootrixCli({
+            program,
+            readConfig: () => api.runtime.config.current(),
+            mutateConfigFile: (options) => api.runtime.config.mutateConfigFile(options),
+        }), { commands: ["hootrix"] });
+        traceDbg("plugin_lifecycle", { node: "register_complete" });
+    },
+});
+export { traceDbg } from "./src/trace-logger.js";

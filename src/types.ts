@@ -18,12 +18,6 @@ export type HootrixPluginConfig = {
   flushRetryBaseDelayMs?: number;
   /** Policy sync interval in milliseconds (default: 120000) */
   policySyncIntervalMs?: number;
-  /** Enable Sage experiment auto-refresh after live traces (default: false) */
-  sageEnabled?: boolean;
-  /** Main backend URL for Sage APIs (default: HOOTRIX_MAIN_API_URL or http://127.0.0.1:9821) */
-  mainApiUrl?: string;
-  /** After finalize, refresh experiment when trace tags include hootrix.experiment_id=… (default: true when sageEnabled) */
-  sageAutoRefreshExperiment?: boolean;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -78,9 +72,7 @@ function looksLikeHootrixPluginConfig(o: Record<string, unknown>): boolean {
     "staleTraceTimeoutMs" in o ||
     "staleSweepIntervalMs" in o ||
     "flushRetryCount" in o ||
-    "flushRetryBaseDelayMs" in o ||
-    "sageEnabled" in o ||
-    "mainApiUrl" in o
+    "flushRetryBaseDelayMs" in o
   );
 }
 
@@ -186,11 +178,6 @@ export function parseHootrixPluginConfig(raw: unknown): HootrixPluginConfig {
     flushRetryCount: asOptionalNumber(cfg.flushRetryCount),
     flushRetryBaseDelayMs: asOptionalNumber(cfg.flushRetryBaseDelayMs),
     policySyncIntervalMs,
-    sageEnabled: parseOptionalBoolean(cfg.sageEnabled),
-    mainApiUrl:
-      asOptionalTrimmedString(cfg.mainApiUrl) ??
-      asOptionalTrimmedString(process.env.HOOTRIX_MAIN_API_URL),
-    sageAutoRefreshExperiment: parseOptionalBoolean(cfg.sageAutoRefreshExperiment),
   };
 }
 
@@ -200,6 +187,8 @@ export type ActiveTrace = {
   /** Resolved Opik trace id for lineage (from trace.data.id). */
   traceId?: string;
   llmSpan: Span | null;
+  /** Wall-clock ms when the current llmSpan was opened (for direct collector completion patches). */
+  llmSpanStartedAt?: number;
   toolSpans: Map<string, Span>;
   subagentSpans: Map<string, Span>;
   startedAt: number;
@@ -238,6 +227,8 @@ export type ActiveTrace = {
   agentId?: string;
   /** Last known trigger from hook context. */
   trigger?: string;
+  /** Sanitized LLM input from the latest llm_input (re-sent on output/finalize to survive SDK/collector races). */
+  lastLlmInput?: Record<string, unknown>;
   /** Output accumulated from llm_output. */
   output?: { output: string; lastAssistant?: unknown };
   /** Data stored by agent_end for deferred finalization. */
@@ -255,6 +246,4 @@ export type ActiveTrace = {
     model?: string;
     provider?: string;
   };
-  /** Sage comparison experiment id from hootrix.experiment_id= tag */
-  experimentId?: string;
 };

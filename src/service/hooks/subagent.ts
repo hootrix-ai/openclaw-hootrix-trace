@@ -3,6 +3,11 @@ import type { Opik as HootrixClient, Span, Trace } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
 import { asNonEmptyString, resolveTraceId } from "../helpers.js";
 import { sanitizeStringForHootrix } from "../payload-sanitizer.js";
+import {
+  buildMinimalSpanCompletionPatch,
+  directPatchSpan,
+  type CollectorExportConfig,
+} from "../../direct-collector-export.js";
 import { traceDbg } from "../../trace-logger.js";
 
 function asStringOrNumber(value: unknown): string | number | undefined {
@@ -54,9 +59,89 @@ type SubagentHooksDeps = {
   safeSpanUpdate: (span: Span, payload: Record<string, unknown>, reason: string) => void;
   safeSpanEnd: (span: Span, reason: string) => void;
   safeTraceUpdate: (trace: Trace, payload: Record<string, unknown>, reason: string) => void;
+  getCollectorExportConfig: () => CollectorExportConfig | null;
+  awaitFlush: (reason: string) => Promise<void>;
   warn: (message: string) => void;
   formatError: (err: unknown) => string;
 };
+
+function readSpanId(span: Span): string | undefined {
+  const id = (span as unknown as { data?: { id?: string } }).data?.id;
+  return typeof id === "string" && id.trim().length > 0 ? id : undefined;
+}
+
+function readSpanStartTime(span: Span): Date | undefined {
+  const start = (span as unknown as { data?: { startTime?: Date } }).data?.startTime;
+  return start instanceof Date ? start : undefined;
+}
+
+function readSpanName(span: Span): string | undefined {
+  const name = (span as unknown as { data?: { name?: string } }).data?.name;
+  return typeof name === "string" && name.trim().length > 0 ? name.trim() : undefined;
+}
+
+async function directCompleteSubagentSpan(
+  deps: Pick<
+    SubagentHooksDeps,
+    "getCollectorExportConfig" | "awaitFlush" | "warn" | "formatError"
+  >,
+  params: {
+    span: Span;
+    traceId: string | undefined;
+    spanName: string | undefined;
+    reason: string;
+  },
+): Promise<void> {
+  const spanId = readSpanId(params.span);
+  const exportCfg = deps.getCollectorExportConfig();
+  if (!exportCfg || !spanId || !params.traceId) {
+    return;
+  }
+  await deps.awaitFlush(`subagent pre-completion ${params.reason}`);
+  try {
+    const patchResult = await directPatchSpan({
+      config: exportCfg,
+      spanId,
+      patch: {
+        ...buildMinimalSpanCompletionPatch({
+          traceId: params.traceId,
+          type: "general",
+          name: params.spanName ?? "subagent",
+          endTime: new Date(),
+        }),
+        startTime: readSpanStartTime(params.span),
+      },
+    });
+    // #region agent log
+    fetch("http://127.0.0.1:7476/ingest/4d7ed9c5-7cd3-4ac7-9c9d-952f6e3c27eb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "cc096c" },
+      body: JSON.stringify({
+        sessionId: "cc096c",
+        location: "subagent.ts:directCompleteSubagentSpan",
+        message: "subagent direct completion patch",
+        data: {
+          spanId,
+          reason: params.reason,
+          status: patchResult.status,
+          ok: patchResult.ok,
+        },
+        timestamp: Date.now(),
+        hypothesisId: "H17",
+        runId: "post-fix-6",
+      }),
+    }).catch(() => {});
+    // #endregion
+    if (!patchResult.ok) {
+      deps.warn(
+        `hootrix: direct subagent span completion patch failed (${params.reason} spanId=${spanId} status=${patchResult.status})`,
+      );
+    }
+  } catch (err) {
+    deps.warn(`hootrix: direct subagent span completion patch error (${params.reason}): ${deps.formatError(err)}`);
+  }
+  await deps.awaitFlush(`subagent post-completion ${params.reason}`);
+}
 
 export function registerSubagentHooks(deps: SubagentHooksDeps): void {
   traceDbg("hooks_registration", { node: "subagent_hooks_registering" });
@@ -82,6 +167,14 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
     const existingHost = deps.getSubagentSpanHost(childSessionKey);
     if (existingHost) {
       deps.safeSpanEnd(existingHost.span, `subagent reset childSessionKey=${childSessionKey}`);
+      const resetTraceId =
+        existingHost.active.traceId ?? resolveTraceId(existingHost.active.trace);
+      void directCompleteSubagentSpan(deps, {
+        span: existingHost.span,
+        traceId: resetTraceId,
+        spanName: readSpanName(existingHost.span),
+        reason: `subagent reset childSessionKey=${childSessionKey}`,
+      });
       existingHost.active.subagentSpans.delete(childSessionKey);
       deps.forgetSubagentSpanHost(childSessionKey);
     }
@@ -343,7 +436,7 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
     );
   });
 
-  deps.api.on("subagent_ended", (event, subagentCtx) => {
+  deps.api.on("subagent_ended", async (event, subagentCtx) => {
     traceDbg("hook_event", { node: "subagent_ended_start" });
     if (!deps.getClient()) {
       traceDbg("hook_event", { node: "subagent_ended_no_client" });
@@ -364,6 +457,21 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
       childSessionKey,
       reason: eventObj.reason,
     });
+    // #region agent log
+    fetch("http://127.0.0.1:7476/ingest/4d7ed9c5-7cd3-4ac7-9c9d-952f6e3c27eb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "cc096c" },
+      body: JSON.stringify({
+        sessionId: "cc096c",
+        location: "subagent.ts:subagent_ended",
+        message: "subagent_ended hook fired",
+        data: { targetSessionKey, requesterSessionKey, reason: eventObj.reason },
+        timestamp: Date.now(),
+        hypothesisId: "H17",
+        runId: "post-fix-6",
+      }),
+    }).catch(() => {});
+    // #endregion
 
     const existingHost = targetSessionKey ? deps.getSubagentSpanHost(targetSessionKey) : undefined;
     traceDbg("trace_state", {
@@ -478,6 +586,13 @@ export function registerSubagentHooks(deps: SubagentHooksDeps): void {
     );
 
     deps.safeSpanEnd(span, `subagent_ended targetSessionKey=${targetSessionKey ?? "unknown"}`);
+    const traceId = host.active.traceId ?? resolveTraceId(host.active.trace);
+    await directCompleteSubagentSpan(deps, {
+      span,
+      traceId,
+      spanName: readSpanName(span),
+      reason: `subagent_ended targetSessionKey=${targetSessionKey ?? "unknown"}`,
+    });
     if (targetSessionKey) {
       host.active.subagentSpans.delete(targetSessionKey);
       deps.forgetSubagentSpanHost(targetSessionKey);

@@ -1,5 +1,5 @@
 import * as p from "@clack/prompts";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { HootrixPluginConfig } from "./types.js";
 import { collectorFetch } from "./collector-fetch.js";
 import { buildHootrixApiUrl, isHootrixCollectorBaseUrl } from "./collector-url.js";

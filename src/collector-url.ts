@@ -2,7 +2,12 @@ import { HOOTRIX_COLLECTOR_HOST } from "./constants.js";
 
 /** Direct collector listen ports (local/cloud :9823; pprof :9534). */
 const HOOTRIX_COLLECTOR_PORTS = [9823, 9534];
-const HOOTRIX_COLLECTOR_HOSTNAME = new URL(HOOTRIX_COLLECTOR_HOST).hostname.toLowerCase();
+const HOOTRIX_COLLECTOR_PATH = new URL(HOOTRIX_COLLECTOR_HOST).pathname.replace(/\/+$/, "");
+
+function normalizeCollectorPath(pathname: string): string {
+  const trimmed = pathname.replace(/\/+$/, "");
+  return trimmed.length > 0 ? trimmed : "/";
+}
 
 /** True when the URL targets Hootrix trace-collector (not Hootrix UI / Comet Cloud). */
 export function isHootrixCollectorBaseUrl(host: string): boolean {
@@ -14,10 +19,8 @@ export function isHootrixCollectorBaseUrl(host: string): boolean {
       return true;
     }
     const h = u.hostname.toLowerCase();
-    if (h === HOOTRIX_COLLECTOR_HOSTNAME || h.endsWith(`.${HOOTRIX_COLLECTOR_HOSTNAME}`)) {
-      return true;
-    }
-    if (h.startsWith("trace.") && (h.endsWith(".hootrix.ai") || h.endsWith(".hootrix.com"))) {
+    const path = normalizeCollectorPath(u.pathname);
+    if (path === HOOTRIX_COLLECTOR_PATH || path.endsWith(HOOTRIX_COLLECTOR_PATH)) {
       return true;
     }
   } catch {

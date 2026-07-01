@@ -2,7 +2,7 @@ import { HOOTRIX_CREATED_FROM, } from "../constants.js";
 import { asNonEmptyString, inferCanonicalThreadKey, mapUsageToHootrixTokens, normalizeProvider, resolveAgentId, channelMetadataFields, logChannelResolve, resolveChannelId, resolveChannelName, resolveEffectiveHootrixSessionKey, resolveTrigger, resolveLlmEndpointMeta, resolveTraceId, } from "../helpers.js";
 import { classificationMetadata, resolveTraceClassification, } from "../trace-classification.js";
 import { buildSanitizedLlmInputFromEvent, sanitizeStringForHootrix, sanitizeValueForHootrix, } from "../payload-sanitizer.js";
-import { experimentMetadataFields, parseExperimentIdFromTags } from "../sage-experiment.js";
+import { directBootstrapTraceAndSpan, directPatchSpan, directPatchTrace, } from "../../direct-collector-export.js";
 import { traceDbg } from "../../trace-logger.js";
 /**
  * OpenClaw may only provide a per-run `sessionId` (UUID) on the first LLM call, then add a stable
@@ -26,7 +26,7 @@ function migrateVolatileSessionKeyIfNeeded(d, agentCtxObj, eventSessionId) {
 }
 export function registerLlmHooks(deps) {
     traceDbg("hooks_registration", { node: "llm_hooks_registering" });
-    deps.api.on("llm_input", (event, agentCtx) => {
+    deps.api.on("llm_input", async (event, agentCtx) => {
         traceDbg("hook_event", { node: "llm_input_start", model: event.model });
         const client = deps.getClient();
         const agentCtxObj = agentCtx;
@@ -56,7 +56,6 @@ export function registerLlmHooks(deps) {
         const trigger = resolveTrigger(agentCtxObj);
         const projectName = deps.getProjectName();
         const tags = deps.getTags();
-        const experimentId = parseExperimentIdFromTags(tags);
         const classification = resolveTraceClassification({
             sessionKey,
             runId: asNonEmptyString(event.runId),
@@ -128,7 +127,6 @@ export function registerLlmHooks(deps) {
                             ? { anchor_parent_thread_id: lineage.anchorParentThreadId }
                             : {}),
                         ...(classification.traceType === "subagent" ? { subagent_thread_id: sessionKey } : {}),
-                        ...experimentMetadataFields(experimentId),
                     },
                     tags: tags.length > 0 ? tags : undefined,
                 });
@@ -163,12 +161,16 @@ export function registerLlmHooks(deps) {
                 metadata: Object.keys(llmEndpointMeta).length > 0 ? llmEndpointMeta : undefined,
             });
             traceDbg("trace_lifecycle", { node: "llm_input_span_created", sessionKey, spanName: event.model });
+            if (llmSpan && llmInputForExport) {
+                deps.safeSpanUpdate(llmSpan, { input: llmInputForExport }, `llm_input span input sessionKey=${sessionKey}`);
+            }
         }
         catch (err) {
             traceDbg("trace_error", { node: "llm_input_span_creation_failed", sessionKey, error: deps.formatError(err) });
             deps.warn(`hootrix: llm span creation failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
         }
         const now = Date.now();
+        const llmSpanStartedAt = now;
         const resolvedTraceId = resolveTraceId(trace);
         if (existing) {
             if (llmInputForExport) {
@@ -178,7 +180,9 @@ export function registerLlmHooks(deps) {
             deps.applyContextMeta(existing, agentCtxObj, sessionKey);
             existing.traceId = resolvedTraceId ?? existing.traceId;
             existing.llmSpan = llmSpan;
+            existing.llmSpanStartedAt = llmSpanStartedAt;
             existing.lastActivityAt = now;
+            existing.lastLlmInput = llmInputForExport;
             existing.model = event.model;
             existing.provider = normalizedProvider;
             if (channelId)
@@ -187,8 +191,6 @@ export function registerLlmHooks(deps) {
                 existing.channelName = channelName;
             if (trigger)
                 existing.trigger = trigger;
-            if (experimentId)
-                existing.experimentId = experimentId;
             traceDbg("trace_state", { node: "llm_input_existing_trace_updated", sessionKey, traceCount: deps.activeTraces.size });
         }
         else {
@@ -200,6 +202,7 @@ export function registerLlmHooks(deps) {
                 toolSpans: new Map(),
                 subagentSpans: new Map(),
                 startedAt: now,
+                llmSpanStartedAt,
                 lastActivityAt: now,
                 costMeta: {},
                 usage: {},
@@ -209,9 +212,25 @@ export function registerLlmHooks(deps) {
                 channelId,
                 channelName,
                 trigger,
-                experimentId,
+                lastLlmInput: llmInputForExport,
             });
             traceDbg("trace_state", { node: "llm_input_new_trace_entry_created", sessionKey, traceCount: deps.activeTraces.size });
+        }
+        const exportCfg = deps.getCollectorExportConfig();
+        if (exportCfg) {
+            try {
+                await directBootstrapTraceAndSpan({
+                    config: exportCfg,
+                    trace,
+                    llmSpan,
+                    threadId: sessionKey,
+                    input: llmInputForExport,
+                    tags: tags.length > 0 ? tags : undefined,
+                });
+            }
+            catch (err) {
+                deps.warn(`hootrix: direct trace bootstrap failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
+            }
         }
         const attachmentPayloads = [
             event.prompt,
@@ -228,9 +247,29 @@ export function registerLlmHooks(deps) {
                 payloads: attachmentPayloads,
             });
         }
+        await deps.awaitFlush(`llm_input sessionKey=${sessionKey}`);
+        if (llmInputForExport) {
+            deps.safeTraceUpdate(trace, { threadId: sessionKey, input: llmInputForExport }, `llm_input post-flush trace patch sessionKey=${sessionKey}`);
+            if (llmSpan) {
+                deps.safeSpanUpdate(llmSpan, { type: "llm", input: llmInputForExport }, `llm_input post-flush span patch sessionKey=${sessionKey}`);
+            }
+        }
+        await deps.awaitFlush(`llm_input post-patch sessionKey=${sessionKey}`);
+        if (exportCfg && llmInputForExport && resolvedTraceId) {
+            try {
+                await directPatchTrace({
+                    config: exportCfg,
+                    traceId: resolvedTraceId,
+                    patch: { threadId: sessionKey, input: llmInputForExport },
+                });
+            }
+            catch (err) {
+                deps.warn(`hootrix: direct trace patch after llm_input failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
+            }
+        }
         traceDbg("hook_event", { node: "llm_input_complete", sessionKey, model: event.model, activeTracesCount: deps.activeTraces.size });
     });
-    deps.api.on("llm_output", (event, agentCtx) => {
+    deps.api.on("llm_output", async (event, agentCtx) => {
         traceDbg("hook_event", { node: "llm_output_start", model: event.model, hasUsage: !!event.usage });
         const client = deps.getClient();
         const agentCtxObj = agentCtx;
@@ -258,9 +297,14 @@ export function registerLlmHooks(deps) {
             return;
         }
         traceDbg("trace_state", { node: "llm_output_found_active_span", sessionKey, spanExists: true });
+        await deps.awaitFlush(`llm_output pre-update sessionKey=${sessionKey}`);
         deps.applyContextMeta(active, agentCtx, sessionKey);
         active.lastActivityAt = Date.now();
         traceDbg("trace_state", { node: "llm_output_context_applied", sessionKey, lastActivityAt: active.lastActivityAt });
+        const llmInputForExport = active.lastLlmInput;
+        if (llmInputForExport) {
+            deps.safeTraceUpdate(active.trace, { input: llmInputForExport }, `llm_output trace input sessionKey=${sessionKey}`);
+        }
         traceDbg("trace_data", { node: "llm_output_sanitizing", sessionKey, assistantTextsCount: event.assistantTexts?.length });
         const sanitizedLlmOutput = sanitizeValueForHootrix({
             assistantTexts: event.assistantTexts,
@@ -306,6 +350,7 @@ export function registerLlmHooks(deps) {
         const spanUpdatePayload = {
             name: llmSpanName,
             type: "llm",
+            ...(llmInputForExport ? { input: llmInputForExport } : {}),
             output: sanitizedLlmOutput,
             usage: hootrixUsage,
             model: event.model,
@@ -325,7 +370,20 @@ export function registerLlmHooks(deps) {
             };
             traceDbg("trace_state", { node: "llm_error_saved_to_active", sessionKey, model: event.model });
         }
-        deps.safeSpanUpdate(active.llmSpan, spanUpdatePayload, `llm_output sessionKey=${sessionKey}`);
+        const llmSpanRef = active.llmSpan;
+        const llmSpanId = llmSpanRef.data?.id;
+        const llmSpanStartTime = (() => {
+            const sdkStart = llmSpanRef.data?.startTime;
+            if (sdkStart instanceof Date) {
+                return sdkStart;
+            }
+            if (active.llmSpanStartedAt != null) {
+                return new Date(active.llmSpanStartedAt);
+            }
+            return undefined;
+        })();
+        const exportCfg = deps.getCollectorExportConfig();
+        deps.safeSpanUpdate(llmSpanRef, spanUpdatePayload, `llm_output sessionKey=${sessionKey}`);
         traceDbg("trace_lifecycle", { node: "llm_output_span_updated", sessionKey, hasError });
         active.output = {
             output: sanitizedAssistantTexts.join("\n\n"),
@@ -338,8 +396,60 @@ export function registerLlmHooks(deps) {
         active.model = event.model;
         active.provider = normalizedProvider;
         traceDbg("trace_lifecycle", { node: "llm_output_ending_span", sessionKey });
-        deps.safeSpanEnd(active.llmSpan, `llm_output sessionKey=${sessionKey}`);
+        deps.safeSpanEnd(llmSpanRef, `llm_output sessionKey=${sessionKey}`);
         active.llmSpan = null;
+        active.llmSpanStartedAt = undefined;
+        if (exportCfg && llmSpanId) {
+            try {
+                // #region agent log
+                fetch("http://127.0.0.1:7476/ingest/4d7ed9c5-7cd3-4ac7-9c9d-952f6e3c27eb", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "cc096c" },
+                    body: JSON.stringify({
+                        sessionId: "cc096c",
+                        location: "llm.ts:llm_output_direct_patch",
+                        message: "llm completion patch payload",
+                        data: {
+                            spanId: llmSpanId,
+                            hasStartTime: llmSpanStartTime != null,
+                            hasUsage: hootrixUsage != null,
+                            usageKeys: hootrixUsage ? Object.keys(hootrixUsage) : [],
+                        },
+                        timestamp: Date.now(),
+                        hypothesisId: "H13-H14",
+                        runId: "post-fix-4",
+                    }),
+                }).catch(() => { });
+                // #endregion
+                await directPatchSpan({
+                    config: exportCfg,
+                    spanId: llmSpanId,
+                    patch: {
+                        ...spanUpdatePayload,
+                        traceId: active.traceId ?? resolveTraceId(active.trace),
+                        startTime: llmSpanStartTime,
+                        endTime: new Date(),
+                    },
+                });
+            }
+            catch (err) {
+                deps.warn(`hootrix: direct llm span completion patch failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
+            }
+        }
+        await deps.awaitFlush(`llm_output sessionKey=${sessionKey}`);
+        const traceId = active.traceId ?? resolveTraceId(active.trace);
+        if (exportCfg && traceId && llmInputForExport) {
+            try {
+                await directPatchTrace({
+                    config: exportCfg,
+                    traceId,
+                    patch: { threadId: sessionKey, input: llmInputForExport, output: active.output },
+                });
+            }
+            catch (err) {
+                deps.warn(`hootrix: direct trace patch after llm_output failed (sessionKey=${sessionKey}): ${deps.formatError(err)}`);
+            }
+        }
         traceDbg("hook_event", { node: "llm_output_complete", sessionKey, model: event.model, outputLength: sanitizedAssistantTexts.join("\n\n").length });
     });
     traceDbg("hooks_registration", { node: "llm_hooks_registered" });

@@ -49,10 +49,9 @@ npm run smoke
 
 Packaging changes should preserve the OpenClaw package contract: source metadata
 stays in `openclaw.extensions`, installed runtime code stays in
-`openclaw.runtimeExtensions`, `npm run pack:check` must pass, and pull requests
-should keep the ClawHub dry-run workflow green. ClawHub publishes also require
-explicit `openclaw.compat.pluginApi` and `openclaw.build.openclawVersion`
-metadata in `package.json`.
+`openclaw.runtimeExtensions`, and `clawhub package validate .` should pass before
+publish. ClawHub publishes also require explicit `openclaw.compat.pluginApi` and
+`openclaw.build.openclawVersion` metadata in `package.json`.
 
 ## Pull requests
 

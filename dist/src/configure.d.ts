@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { HootrixPluginConfig } from "./types.js";
 type ConfigWriteAfterPolicy = {
     mode: "auto";

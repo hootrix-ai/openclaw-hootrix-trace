@@ -1,9 +1,10 @@
 import { asNonEmptyString, resolveRunId, resolveToolCallId } from "../helpers.js";
 import { sanitizeStringForHootrix, sanitizeValueForHootrix } from "../payload-sanitizer.js";
+import { buildMinimalSpanCompletionPatch, directBootstrapSpan, directPatchSpan, } from "../../direct-collector-export.js";
 import { traceDbg } from "../../trace-logger.js";
 export function registerToolHooks(deps) {
     traceDbg("hooks_registration", { node: "tool_hooks_registering" });
-    deps.api.on("before_tool_call", (event, toolCtx) => {
+    deps.api.on("before_tool_call", async (event, toolCtx) => {
         traceDbg("hook_event", { node: "before_tool_call_start", tool: event.tool });
         if (!deps.getClient()) {
             traceDbg("hook_event", { node: "before_tool_call_no_client" });
@@ -69,6 +70,24 @@ export function registerToolHooks(deps) {
         }
         active.toolSpans.set(spanKey, toolSpan);
         traceDbg("trace_state", { node: "before_tool_call_span_stored", sessionKey, spanKey, totalToolSpans: active.toolSpans.size });
+        const exportCfg = deps.getCollectorExportConfig();
+        const toolSpanId = toolSpan.data?.id;
+        const traceId = active.traceId ?? toolSpan.data?.traceId;
+        if (exportCfg && toolSpanId) {
+            try {
+                const bootstrap = await directBootstrapSpan({
+                    config: exportCfg,
+                    span: toolSpan,
+                    traceId,
+                });
+                if (!bootstrap.ok) {
+                    deps.warn(`hootrix: direct tool span bootstrap failed (sessionKey=${sessionKey} tool=${event.toolName} status=${bootstrap.status})`);
+                }
+            }
+            catch (err) {
+                deps.warn(`hootrix: direct tool span bootstrap error (sessionKey=${sessionKey} tool=${event.toolName}): ${deps.formatError(err)}`);
+            }
+        }
         traceDbg("attachment", { node: "before_tool_call_scheduling_upload", sessionKey, toolName: event.toolName });
         deps.scheduleMediaAttachmentUploads({
             entityType: "span",
@@ -80,7 +99,7 @@ export function registerToolHooks(deps) {
         });
         traceDbg("hook_event", { node: "before_tool_call_complete", sessionKey, toolName: event.toolName });
     });
-    deps.api.on("after_tool_call", (event, toolCtx) => {
+    deps.api.on("after_tool_call", async (event, toolCtx) => {
         traceDbg("hook_event", { node: "after_tool_call_start" });
         if (!deps.getClient()) {
             traceDbg("hook_event", { node: "after_tool_call_no_client" });
@@ -214,8 +233,37 @@ export function registerToolHooks(deps) {
             payloads: [event.params, event.result, event.error],
         });
         traceDbg("trace_lifecycle", { node: "after_tool_call_ending_span", sessionKey, matchedKey, remainingToolSpans: active.toolSpans.size });
+        const toolSpanId = matchedSpan.data?.id;
+        const traceId = active.traceId ?? matchedSpan.data?.traceId;
         deps.safeSpanEnd(matchedSpan, `after_tool_call sessionKey=${sessionKey} tool=${event.toolName} key=${matchedKey}`);
         active.toolSpans.delete(matchedKey);
+        await deps.awaitFlush(`after_tool_call pre-completion sessionKey=${sessionKey} tool=${event.toolName}`);
+        const exportCfg = deps.getCollectorExportConfig();
+        if (exportCfg && toolSpanId && traceId) {
+            try {
+                const completionPatch = buildMinimalSpanCompletionPatch({
+                    name: spanUpdate.name,
+                    type: "tool",
+                    traceId,
+                    endTime: new Date(),
+                });
+                const patchResult = await directPatchSpan({
+                    config: exportCfg,
+                    spanId: toolSpanId,
+                    patch: completionPatch,
+                });
+                if (!patchResult.ok) {
+                    deps.warn(`hootrix: direct tool span completion patch failed (sessionKey=${sessionKey} tool=${event.toolName} spanId=${toolSpanId} status=${patchResult.status})`);
+                }
+            }
+            catch (err) {
+                deps.warn(`hootrix: direct tool span completion patch error (sessionKey=${sessionKey} tool=${event.toolName}): ${deps.formatError(err)}`);
+            }
+        }
+        else if (exportCfg && toolSpanId && !traceId) {
+            deps.warn(`hootrix: skipping direct tool span completion patch (missing traceId sessionKey=${sessionKey} tool=${event.toolName} spanId=${toolSpanId})`);
+        }
+        await deps.awaitFlush(`after_tool_call sessionKey=${sessionKey} tool=${event.toolName}`);
         traceDbg("hook_event", { node: "after_tool_call_complete", sessionKey, toolName: event.toolName, remainingToolSpans: active.toolSpans.size });
     });
     traceDbg("hooks_registration", { node: "tool_hooks_registered" });

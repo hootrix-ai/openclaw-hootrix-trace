@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { HOOTRIX_PLUGIN_ID } from "./constants.js";
-const DEBUG_LOG_FILE = "/tmp/hootrix-debug.ndjson";
+const DEBUG_LOG_FILE = "/tmp/hootrix-debug.json";
 export class TraceLogger {
     config;
     constructor(config) {

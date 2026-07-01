@@ -177,27 +177,14 @@ keeping TypeScript source metadata for development and older OpenClaw fallback
 loads. `openclaw.extensions` points at `./index.ts`; `openclaw.runtimeExtensions`
 points at `./dist/index.js`. ClawHub also requires explicit
 `openclaw.compat.pluginApi` and `openclaw.build.openclawVersion` metadata.
-`npm pack` and `npm publish` run `npm run build` through `prepack`, and
-`npm run pack:check` verifies the tarball contract.
-Pull requests also dry-run the ClawHub package publish workflow, and GitHub
-releases publish the validated package to both npm and ClawHub.
+`npm pack` and `npm publish` run `npm run build` through `prepack`.
+Before publishing to ClawHub, run `clawhub package validate .` locally.
 
-Optional live gateway E2E:
+Optional live gateway E2E (requires `OPIK_E2E=1` and collector credentials):
 
 ```bash
-npm run test:live
+OPIK_E2E=1 npm run test:e2e
 ```
-
-Notes:
-
-- uses an isolated `.artifacts/live-e2e/<run-id>/home/.openclaw` so it does not touch your normal OpenClaw config
-- `HOOTRIX_API_KEY`, `HOOTRIX_URL`, `PROJECT_NAME`, and `WORKSPACE` win if set in env
-- otherwise it reuses `~/.openclaw/openclaw.json -> plugins.entries.openclaw-hootrix-trace.config` for `apiUrl` / `apiKey` / project / workspace
-- set `OPENCLAW_LIVE_USE_HOST_CONFIG=0` to disable reading host plugin config and require explicit env-only Opik settings
-- still requires `OPENAI_API_KEY` in env for the real model call
-- packs and installs the current plugin build into a fresh OpenClaw home
-- falls back to `npx openclaw@${OPENCLAW_LIVE_OPENCLAW_VERSION:-latest}` when `openclaw` is not already on your `PATH`
-- override the live model with `OPENCLAW_LIVE_MODEL` if `gpt-4o-mini` is not what you want to exercise
 
 ## Contributing
 

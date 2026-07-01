@@ -1,6 +1,6 @@
 {
-  "name": "openclaw-hootrix-trace",
-  "version": "1.0.10",
+  "name": "@hootrix/openclaw-hootrix-trace",
+  "version": "1.1.0",
   "license": "Apache-2.0",
   "description": "OpenClaw trace exporter — sends LLM traces to Hootrix",
   "repository": {
@@ -19,19 +19,15 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "vitest run src/**/*.e2e.test.ts",
-    "test:live": "node scripts/live-e2e.mjs",
-    "pack:check": "node scripts/check-pack-payload.mjs",
     "prepack": "npm run build",
     "smoke": "vitest run src/plugin.smoke.test.ts",
-
     "prebuild": "node scripts/ensure-hootrix.mjs",
     "postinstall": "node scripts/ensure-dist-shim.mjs",
     "dev:shim": "node scripts/ensure-dist-shim.mjs"
   },
   "dependencies": {
     "@clack/prompts": "^1.0.1",
-    "hootrix": "^1.0.28",
-    "zod": "^4.3.6"
+    "hootrix": "^1.0.28"
   },
   "peerDependencies": {
     "openclaw": ">=2026.4.0"
@@ -62,25 +58,16 @@
     "src/plugin-instance-client.ts",
     "src/collector-url.ts",
     "src/collector-fetch.ts",
+    "src/direct-collector-export.ts",
     "src/service/helpers.ts",
     "src/service/payload-sanitizer.ts",
     "src/service/media.ts",
-    "src/service/sage-client.ts",
-    "src/service/sage-experiment.ts",
     "src/service/trace-classification.ts",
     "src/service/attachment-uploader.ts",
-    "src/service/trace-ndjson-log.ts",
     "src/service/hooks/gateway.ts",
     "src/service/hooks/llm.ts",
     "src/service/hooks/tool.ts",
     "src/service/hooks/subagent.ts",
-    "src/service/security/index.ts",
-    "src/service/security/types.ts",
-    "src/service/security/policy-priority.ts",
-    "src/service/security/pattern-normalize.ts",
-    "src/service/security/vault-pipeline.ts",
-    "src/service/security/redactor.ts",
-    "src/service/security/api-client.ts",
     "src/trace-logger.ts",
     "src/types.ts",
     "openclaw.plugin.json",

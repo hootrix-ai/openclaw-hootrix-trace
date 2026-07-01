@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type {  Opik as HootrixClient } from "hootrix";
 import type { ActiveTrace } from "../../types.js";
 import { traceDbg } from "../../trace-logger.js";

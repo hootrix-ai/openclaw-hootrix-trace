@@ -134,10 +134,14 @@ function createServiceContext(
 }
 
 /** Invoke a captured hook with event + context. */
-function invokeHook(hooks: Record<string, Function>, name: string, event: unknown, ctx: unknown) {
+async function invokeHook(hooks: Record<string, Function>, name: string, event: unknown, ctx: unknown) {
   const hook = hooks[name];
   if (!hook) throw new Error(`Hook "${name}" not registered`);
-  return hook(event, ctx);
+  const result = hook(event, ctx);
+  if (result && typeof (result as Promise<unknown>).then === "function") {
+    return await result;
+  }
+  return result;
 }
 
 function agentCtx(sessionKey: string | undefined, extra: Record<string, unknown> = {}) {
@@ -507,6 +511,12 @@ describe("opik service", () => {
           provider: "openai",
         }),
       );
+
+      await vi.waitFor(() =>
+        expect(mockFlush).toHaveBeenCalledWith(
+          expect.stringContaining("llm_input sessionKey=session-1"),
+        ),
+      );
     });
 
     test("passes the configured project name when creating traces", async () => {
@@ -767,7 +777,7 @@ describe("opik service", () => {
         agentCtx("s1", { channelId: "discord", trigger: "cron" }),
       );
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -780,9 +790,10 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      expect(mockLlmSpan.update).toHaveBeenCalledWith(
+      expect(mockLlmSpan.update).toHaveBeenLastCalledWith(
         expect.objectContaining({
           name: "gpt-4",
+          input: expect.objectContaining({ prompt: "hi" }),
           output: { assistantTexts: ["Hello!"], lastAssistant: "Hello!" },
           usage: {
             prompt_tokens: 10,
@@ -796,6 +807,8 @@ describe("opik service", () => {
         }),
       );
       expect(mockLlmSpan.end).toHaveBeenCalled();
+
+      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(4));
     });
 
     test("normalizes openai-codex provider to openai on llm_output updates", async () => {
@@ -815,7 +828,7 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -828,14 +841,14 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      expect(mockLlmSpan.update).toHaveBeenCalledWith(
+      expect(mockLlmSpan.update).toHaveBeenLastCalledWith(
         expect.objectContaining({
           provider: "openai",
         }),
       );
     });
 
-    test("does not call trace.update directly (deferred to finalization)", async () => {
+    test("llm_output re-sends cached llm input on trace and span updates", async () => {
       const { api, hooks } = createApi();
       const mockLlmSpan = opikState.createMockSpan();
       const mockTrace = opikState.createMockTrace();
@@ -852,7 +865,7 @@ describe("opik service", () => {
         agentCtx("s1", { channelId: "discord", trigger: "cron" }),
       );
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -865,8 +878,13 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      // llm_output should NOT call trace.update — output is deferred to finalizeTrace
-      expect(mockTrace.update).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(mockTrace.update).toHaveBeenCalled());
+
+      expect(mockTrace.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: expect.objectContaining({ prompt: "hi" }),
+        }),
+      );
     });
 
     test("omits usage when no fields provided", async () => {
@@ -879,8 +897,8 @@ describe("opik service", () => {
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
-      invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
-      invokeHook(
+      await invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -892,7 +910,7 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      expect(mockLlmSpan.update).toHaveBeenCalledWith(
+      expect(mockLlmSpan.update).toHaveBeenLastCalledWith(
         expect.objectContaining({ usage: undefined }),
       );
     });
@@ -907,8 +925,8 @@ describe("opik service", () => {
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
-      invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
-      invokeHook(
+      await invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -920,7 +938,7 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      const usageArg = mockLlmSpan.update.mock.calls[0][0].usage;
+      const usageArg = mockLlmSpan.update.mock.calls.at(-1)?.[0]?.usage;
       expect(usageArg).toEqual({ prompt_tokens: 100, completion_tokens: 50 });
     });
 
@@ -2371,6 +2389,7 @@ describe("opik service", () => {
         (c: unknown[]) => (c[0] as Record<string, unknown>)?.metadata,
       );
       expect(agentEndCall).toBeDefined();
+      expect(agentEndCall![0]).toEqual(expect.objectContaining({ threadId: "s1" }));
       const metadata = (agentEndCall![0] as Record<string, unknown>).metadata as Record<
         string,
         unknown
@@ -2407,7 +2426,7 @@ describe("opik service", () => {
         { model: "gpt-5.3-codex-spark", provider: "openai-codex", prompt: "hi" },
         agentCtx("s1"),
       );
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -2423,7 +2442,7 @@ describe("opik service", () => {
 
       await flushDeferredFinalize();
 
-      const metadata = mockTrace.update.mock.calls[0][0].metadata;
+      const metadata = mockTrace.update.mock.calls.at(-1)?.[0]?.metadata;
       expect(metadata.provider).toBe("openai");
     });
 
@@ -2444,7 +2463,7 @@ describe("opik service", () => {
         agentCtx("s1"),
       );
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -2460,7 +2479,7 @@ describe("opik service", () => {
 
       await flushDeferredFinalize();
 
-      const metadata = mockTrace.update.mock.calls[0][0].metadata as Record<string, unknown>;
+      const metadata = mockTrace.update.mock.calls.at(-1)?.[0]?.metadata as Record<string, unknown>;
       expect(metadata.usage).toEqual(expect.objectContaining({ total: 150 }));
     });
 
@@ -2496,14 +2515,14 @@ describe("opik service", () => {
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_input",
         { model: "gpt-4", provider: "openai", prompt: "hi" },
         agentCtx("s1"),
       );
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_output",
         {
@@ -2518,17 +2537,22 @@ describe("opik service", () => {
 
       invokeHook(hooks, "agent_end", { success: true, durationMs: 500 }, agentCtx("s1"));
 
-      // Before microtask: trace.update/end not yet called
-      expect(mockTrace.update).not.toHaveBeenCalled();
+      // Before deferred finalize: llm_output already sent trace input
+      expect(mockTrace.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: expect.objectContaining({ prompt: "hi" }),
+        }),
+      );
       expect(mockTrace.end).not.toHaveBeenCalled();
 
       await flushDeferredFinalize();
 
-      // After microtask: single consolidated trace.update with both output and metadata
-      expect(mockTrace.update).toHaveBeenCalledTimes(1);
-      expect(mockTrace.update).toHaveBeenCalledWith(
+      expect(mockTrace.update).toHaveBeenLastCalledWith(
         expect.objectContaining({
+          threadId: "s1",
+          input: expect.objectContaining({ prompt: "hi" }),
           output: { output: "Hello!", lastAssistant: "Hello!" },
+          endTime: expect.any(Date),
           metadata: expect.objectContaining({
             success: true,
             durationMs: 500,
@@ -2538,8 +2562,8 @@ describe("opik service", () => {
           }),
         }),
       );
-      expect(mockTrace.end).toHaveBeenCalledTimes(1);
-      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(1));
+      expect(mockTrace.end).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(6));
     });
 
     test("agent_end without llm_output extracts output from messages", async () => {
@@ -2552,7 +2576,7 @@ describe("opik service", () => {
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_input",
         { model: "gpt-4", provider: "openai", prompt: "hi" },
@@ -2599,7 +2623,7 @@ describe("opik service", () => {
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
-      invokeHook(
+      await invokeHook(
         hooks,
         "llm_input",
         { model: "gpt-4", provider: "openai", prompt: "hi" },
@@ -2619,7 +2643,7 @@ describe("opik service", () => {
 
       await flushDeferredFinalize();
 
-      const metadata = mockTrace.update.mock.calls[0][0].metadata;
+      const metadata = mockTrace.update.mock.calls.at(-1)?.[0]?.metadata;
       // Usage should fall back to costMeta values since llm_output never fired
       expect(metadata.usage).toEqual({
         input: 200,
@@ -2639,18 +2663,19 @@ describe("opik service", () => {
       const service = createHootrixService(api as any);
       await service.start(createServiceContext() as any);
 
-      invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
+      await invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
       invokeHook(hooks, "agent_end", { success: true, durationMs: 100 }, agentCtx("s1"));
 
-      // Synchronously: no trace.update or trace.end yet
-      expect(mockTrace.update).not.toHaveBeenCalled();
+      // Synchronously: llm_input post-flush patch may run, but not finalize yet
       expect(mockTrace.end).not.toHaveBeenCalled();
 
       await flushDeferredFinalize();
 
-      // After microtask: finalization happened
-      expect(mockTrace.update).toHaveBeenCalled();
-      expect(mockTrace.end).toHaveBeenCalled();
+      // After deferred finalize: consolidated trace.update with endTime
+      expect(mockTrace.update).toHaveBeenCalledWith(
+        expect.objectContaining({ endTime: expect.any(Date) }),
+      );
+      expect(mockTrace.end).not.toHaveBeenCalled();
     });
 
     test("empty assistantTexts with agent_end messages uses llm_output path (output: '')", async () => {
@@ -3091,14 +3116,18 @@ describe("opik service", () => {
       mockFlush.mockRejectedValueOnce(new Error("network error")).mockResolvedValueOnce(undefined);
 
       invokeHook(hooks, "llm_input", { model: "m", provider: "p", prompt: "" }, agentCtx("s1"));
+      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalled());
+      mockFlush.mockClear();
+      mockFlush.mockRejectedValueOnce(new Error("network error")).mockResolvedValueOnce(undefined);
+
       invokeHook(hooks, "agent_end", { success: true, durationMs: 10 }, agentCtx("s1"));
 
       await flushDeferredFinalize();
-      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(4));
 
       await vi.advanceTimersByTimeAsync(10);
       await Promise.resolve();
-      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(mockFlush).toHaveBeenCalledTimes(4));
       expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("flush failed"));
     });
 
